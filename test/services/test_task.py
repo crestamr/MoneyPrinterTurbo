@@ -359,6 +359,60 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(warnings, [{"code": "sonilo_bgm_failed", "video_index": 1}])
         self.assertTrue(generate.call_args.kwargs["bgm_file_override"].endswith(".m4a"))
 
+    def _combine_videos_with_subtitle(self, subtitle_path):
+        """跑一次 generate_final_videos，返回 combine_videos 收到的关键字参数。"""
+        params = VideoParams(video_subject="test", video_count=1)
+
+        with (
+            patch.object(tm.video, "combine_videos") as combine_videos,
+            patch.object(tm.video, "generate_video"),
+            patch.object(tm.sm.state, "update_task"),
+        ):
+            tm.generate_final_videos(
+                task_id="subtitle-boundary-task",
+                params=params,
+                downloaded_videos=["material.mp4"],
+                audio_file="audio.mp3",
+                subtitle_path=subtitle_path,
+                audio_duration=10,
+            )
+
+        return combine_videos.call_args.kwargs
+
+    def test_generate_final_videos_forwards_subtitle_end_times_as_boundaries(self):
+        """字幕可用时，画面切点必须拿到字幕句子的结束时间（秒）。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = os.path.join(temp_dir, "subtitle.srt")
+            with open(subtitle_path, "w", encoding="utf-8") as file:
+                file.write(
+                    "1\n00:00:00,000 --> 00:00:02,500\nfirst sentence\n\n"
+                    "2\n00:00:02,500 --> 00:00:06,250\nsecond sentence\n\n"
+                    "3\n00:00:06,250 --> 00:01:01,000\nthird sentence\n\n"
+                )
+
+            kwargs = self._combine_videos_with_subtitle(subtitle_path)
+
+        self.assertEqual(kwargs["subtitle_boundaries"], [2.5, 6.25, 61.0])
+        for boundary in kwargs["subtitle_boundaries"]:
+            self.assertIsInstance(boundary, float)
+
+    def test_generate_final_videos_omits_boundaries_without_subtitles(self):
+        """关闭字幕时必须传 None，保持原有的固定间隔切镜头行为。"""
+        kwargs = self._combine_videos_with_subtitle("")
+
+        self.assertIsNone(kwargs.get("subtitle_boundaries"))
+
+    def test_generate_final_videos_omits_boundaries_for_invalid_subtitle(self):
+        """字幕文件为空或无法解析时同样必须退回 None，而不是空列表。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = os.path.join(temp_dir, "subtitle.srt")
+            with open(subtitle_path, "w", encoding="utf-8") as file:
+                file.write("")
+
+            kwargs = self._combine_videos_with_subtitle(subtitle_path)
+
+        self.assertIsNone(kwargs.get("subtitle_boundaries"))
+
     def test_run_pipeline_fails_fast_when_ffmpeg_is_not_ready(self):
         """完整视频流水线必须在 LLM/TTS/素材服务之前先确认 FFmpeg 可用。"""
         params = VideoParams(video_subject="test")

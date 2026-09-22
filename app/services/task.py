@@ -913,6 +913,34 @@ def _get_material_source_groups(task_id: str, video_paths: list[str]) -> dict[st
         return {}
 
 
+def _srt_time_to_seconds(value: str) -> float | None:
+    """把 SRT 的 ``HH:MM:SS,mmm`` 时间戳转成秒。无法解析时返回 None。"""
+    try:
+        hours, minutes, seconds = value.strip().replace(",", ".").split(":")
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _subtitle_cut_boundaries(subtitle_path: str) -> list[float] | None:
+    """读取字幕里每句话的结束时间（相对旁白开头的秒数），用于对齐画面切点。
+
+    返回 None 表示“没有可用的句子边界”，让 ``combine_videos`` 保持原来的
+    固定间隔切镜头行为；空列表会被误读成“有字幕但一句都没有”。
+    """
+    if not subtitle_path:
+        return None
+
+    boundaries = []
+    for _, times, _ in subtitle.file_to_subtitles(subtitle_path):
+        _, _, end_time = times.partition(" --> ")
+        seconds = _srt_time_to_seconds(end_time)
+        if seconds is not None:
+            boundaries.append(seconds)
+
+    return boundaries or None
+
+
 def generate_final_videos(
     task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
 ):
@@ -943,6 +971,8 @@ def generate_final_videos(
     else:
         video_concat_mode = VideoConcatMode.random
     video_transition_mode = params.video_transition_mode
+    # 字幕只解析一次，所有分身视频共用同一份句子边界。
+    subtitle_boundaries = _subtitle_cut_boundaries(subtitle_path)
 
     _progress = 50
     for i in range(params.video_count):
@@ -971,6 +1001,7 @@ def generate_final_videos(
             max_clip_duration=params.video_clip_duration,
             threads=params.n_threads,
             clip_speed=params.video_clip_speed,
+            subtitle_boundaries=subtitle_boundaries,
             **batch_options,
         )
         if allocate_batch_materials:

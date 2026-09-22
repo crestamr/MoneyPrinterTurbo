@@ -437,6 +437,13 @@ mimo_tts_style_prompt = "请用自然、清晰、适合短视频旁白的语气�
 # Leave empty to skip generation.
 subtitle_provider = "edge"
 
+# Snap clip cuts to sentence boundaries from the subtitles, so visuals change
+# between sentences instead of mid-phrase. A cut moves at most this many
+# seconds from its natural position; 0 disables snapping entirely.
+# 让画面切换对齐字幕句子边界，避免在句子中间切镜头；
+# 该值是切点允许偏移的最大秒数，设置为 0 表示关闭该功能。
+clip_cut_snap_tolerance = 1.0
+
 # FFmpeg is normally downloaded and detected automatically. If detection fails,
 # download it from https://www.gyan.dev/ffmpeg/builds/ and set the executable.
 # Windows example: ffmpeg_path = "C:\\path\\to\\ffmpeg.exe"
