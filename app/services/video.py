@@ -839,6 +839,7 @@ def combine_videos(
     source_usage: dict[str, int] | None = None,
     source_groups: dict[str, str] | None = None,
     used_video_paths: List[str] | None = None,
+    subtitle_boundaries: List[float] | None = None,
 ) -> str:
     audio_clip = AudioFileClip(audio_file)
     try:
@@ -868,6 +869,21 @@ def combine_videos(
     # 仍固定读取 3 秒再慢放、裁剪，下一段却从源视频第 3 秒开始，会跳过中间
     # 1.5 秒画面。该计算同时保证不同速度下的源时间线连续且无重叠。
     source_clip_duration = max_clip_duration * normalized_clip_speed
+    # 没有字幕时间时完全不排期，保持“每段固定 max_clip_duration”的原有行为，
+    # 避免默认路径因为计划里的末尾零头片段产生任何差异。
+    planned_durations: List[float] = []
+    if subtitle_boundaries:
+        snap_tolerance = float(config.app.get("clip_cut_snap_tolerance", 1.0))
+        planned_durations = plan_clip_durations(
+            subtitle_boundaries,
+            max_clip_duration=max_clip_duration,
+            total_duration=required_video_duration,
+            tolerance=snap_tolerance,
+        )
+        logger.info(
+            f"planned {len(planned_durations)} speech-anchored clips "
+            f"(snap tolerance: {snap_tolerance:.2f}s)"
+        )
     output_dir = os.path.dirname(combined_video_path)
 
     aspect = VideoAspect(video_aspect)
@@ -957,9 +973,30 @@ def combine_videos(
         )
         
         try:
-            clip = _open_video_clip_quietly(subclipped_item.file_path).subclipped(
-                subclipped_item.start_time, subclipped_item.end_time
+            source_clip = _open_video_clip_quietly(subclipped_item.file_path)
+            # 切片循环是按“每个源文件”独立进行的，而 _prioritize_unique_source_clips
+            # 与顺序模式的后备片段轮换都会重排片段，因此切片顺序并不是成片顺序。
+            # 排期表描述的是成片时间线上第几段该播多久，只有在这里才知道当前片段
+            # 落在成片的哪个位置：已完成的片段数就是它的时间线序号。
+            timeline_index = len(processed_clips)
+            planned_duration = (
+                planned_durations[timeline_index]
+                if timeline_index < len(planned_durations)
+                else None
             )
+            target_duration = planned_duration or max_clip_duration
+            source_end_time = subclipped_item.end_time
+            if planned_duration:
+                # 排期的是成片时长，源时间轴要按播放速度反推；吸附到句末时切点
+                # 可能略超 max_clip_duration，所以这里按源素材总时长兜底。
+                source_end_time = min(
+                    subclipped_item.start_time
+                    + planned_duration * normalized_clip_speed,
+                    source_clip.duration,
+                )
+                if source_end_time <= subclipped_item.start_time:
+                    source_end_time = subclipped_item.end_time
+            clip = source_clip.subclipped(subclipped_item.start_time, source_end_time)
             # 播放速度属于素材本身属性，应在转场前应用。这样 Fade/Slide 等一秒转场
             # 不会跟随素材速度变成 0.5 秒或 2 秒；后续最大时长裁剪继续作为
             # 浮点误差或异常素材时长的安全兜底，保证最终片段不突破配置上限。
@@ -1012,8 +1049,10 @@ def combine_videos(
                 shuffle_transition = random.choice(transition_funcs)
                 clip = shuffle_transition(clip)
 
-            if clip.duration > max_clip_duration:
-                clip = clip.subclipped(0, max_clip_duration)
+            # 上限跟随本段的目标时长：默认仍是 max_clip_duration，排期生效时
+            # 允许吸附到句末带来的那一点超出，否则这里会把刚对齐的切点切回去。
+            if clip.duration > target_duration:
+                clip = clip.subclipped(0, target_duration)
                 
             # wirte clip to temp file
             clip_file = f"{output_dir}/temp-clip-{i+1}.mp4"

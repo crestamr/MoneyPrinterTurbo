@@ -847,6 +847,8 @@ class TestVideoService(unittest.TestCase):
         audio_duration,
         clip_speed,
         max_clip_duration=3,
+        subtitle_boundaries=None,
+        snap_tolerance=1.0,
     ):
         """使用轻量假视频记录 combine_videos 实际读取的源时间范围。"""
 
@@ -909,6 +911,9 @@ class TestVideoService(unittest.TestCase):
                 ),
                 patch.object(vd, "concat_video_clips_with_ffmpeg"),
                 patch.object(vd, "delete_files"),
+                patch.dict(
+                    vd.config.app, {"clip_cut_snap_tolerance": snap_tolerance}
+                ),
             ):
                 vd.combine_videos(
                     combined_video_path=combined_video_path,
@@ -917,6 +922,7 @@ class TestVideoService(unittest.TestCase):
                     video_concat_mode=vd.VideoConcatMode.random,
                     max_clip_duration=max_clip_duration,
                     clip_speed=clip_speed,
+                    subtitle_boundaries=subtitle_boundaries,
                 )
 
         return source_ranges, written_durations
@@ -944,6 +950,49 @@ class TestVideoService(unittest.TestCase):
 
         self.assertEqual(source_ranges, [(0, 6.0)])
         self.assertEqual(written_durations, [3.0])
+
+    def test_combine_videos_cuts_on_a_nearby_sentence_boundary(self):
+        """字幕边界应把切点从固定的 5 秒挪到 5.4 秒的句末。"""
+
+        source_ranges, written_durations = self._capture_source_ranges_for_clip_speed(
+            source_duration=30.0,
+            audio_duration=14.9,
+            clip_speed=1.0,
+            max_clip_duration=5,
+            subtitle_boundaries=[5.4, 10.2],
+        )
+
+        self.assertAlmostEqual(source_ranges[0][0], 0.0)
+        self.assertAlmostEqual(source_ranges[0][1], 5.4)
+        self.assertAlmostEqual(written_durations[0], 5.4)
+        self.assertAlmostEqual(written_durations[1], 4.8)
+
+    def test_combine_videos_without_boundaries_keeps_fixed_cuts(self):
+        """不传字幕边界时必须与现有的固定切片行为完全一致。"""
+
+        source_ranges, written_durations = self._capture_source_ranges_for_clip_speed(
+            source_duration=30.0,
+            audio_duration=14.9,
+            clip_speed=1.0,
+            max_clip_duration=5,
+        )
+
+        self.assertEqual(source_ranges[:3], [(0, 5), (5, 10), (10, 15)])
+        self.assertEqual(written_durations[:3], [5, 5, 5])
+
+    def test_combine_videos_scales_planned_cuts_by_clip_speed(self):
+        """排期是成片时长，源时间轴必须按播放速度反推。"""
+
+        source_ranges, written_durations = self._capture_source_ranges_for_clip_speed(
+            source_duration=40.0,
+            audio_duration=14.9,
+            clip_speed=2.0,
+            max_clip_duration=5,
+            subtitle_boundaries=[5.4],
+        )
+
+        self.assertAlmostEqual(source_ranges[0][1], 10.8)
+        self.assertAlmostEqual(written_durations[0], 5.4)
 
     def _capture_sequential_source_reads(
         self,
