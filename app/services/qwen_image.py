@@ -61,18 +61,19 @@ def is_comfyui_reachable(base_url: str | None = None) -> bool:
         return False
 
 
+def _model_names() -> tuple[str, str, str]:
+    """Return the configured (unet, clip, vae) model filenames."""
+    return (
+        str(config.qwen_image.get("unet_name") or DEFAULT_UNET_NAME),
+        str(config.qwen_image.get("clip_name") or DEFAULT_CLIP_NAME),
+        str(config.qwen_image.get("vae_name") or DEFAULT_VAE_NAME),
+    )
+
+
 def _build_plain_t2i_graph(
     prompt: str, width: int, height: int, steps: int, seed: int
 ) -> dict:
-    unet_name = str(
-        config.qwen_image.get("unet_name", DEFAULT_UNET_NAME) or DEFAULT_UNET_NAME
-    )
-    clip_name = str(
-        config.qwen_image.get("clip_name", DEFAULT_CLIP_NAME) or DEFAULT_CLIP_NAME
-    )
-    vae_name = str(
-        config.qwen_image.get("vae_name", DEFAULT_VAE_NAME) or DEFAULT_VAE_NAME
-    )
+    unet_name, clip_name, vae_name = _model_names()
     return {
         "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": unet_name}},
         "2": {
@@ -124,17 +125,14 @@ def _build_plain_t2i_graph(
 
 
 def _build_host_reference_graph(
-    prompt: str, host_image_filename: str, width: int, height: int, steps: int, seed: int
+    prompt: str,
+    host_image_filename: str,
+    width: int,
+    height: int,
+    steps: int,
+    seed: int,
 ) -> dict:
-    unet_name = str(
-        config.qwen_image.get("unet_name", DEFAULT_UNET_NAME) or DEFAULT_UNET_NAME
-    )
-    clip_name = str(
-        config.qwen_image.get("clip_name", DEFAULT_CLIP_NAME) or DEFAULT_CLIP_NAME
-    )
-    vae_name = str(
-        config.qwen_image.get("vae_name", DEFAULT_VAE_NAME) or DEFAULT_VAE_NAME
-    )
+    unet_name, clip_name, vae_name = _model_names()
     return {
         "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": unet_name}},
         "2": {
@@ -311,10 +309,14 @@ def _get_host_reference_filename(
             )
         return _upload_input_image(host_reference_image, base_url)
 
-    host_description = str(
-        config.qwen_image.get("host_description", DEFAULT_HOST_DESCRIPTION)
-        or DEFAULT_HOST_DESCRIPTION
-    )
+    # Collapse whitespace so a stray trailing space doesn't silently mint a new
+    # face: the cache key is what keeps the host consistent across videos.
+    host_description = " ".join(
+        str(
+            config.qwen_image.get("host_description", DEFAULT_HOST_DESCRIPTION)
+            or DEFAULT_HOST_DESCRIPTION
+        ).split()
+    ) or DEFAULT_HOST_DESCRIPTION
     cache_dir = utils.storage_dir("qwen_image_host_cache", create=True)
     cache_path = os.path.join(cache_dir, f"{utils.md5(host_description)}.png")
 
@@ -329,8 +331,12 @@ def _get_host_reference_filename(
         )
         entry = _submit_and_wait(graph, base_url, poll_interval, poll_timeout)
         portrait_bytes = _fetch_output_image(entry, base_url)
-        with open(cache_path, "wb") as f:
+        # Write-then-rename: a crash mid-write must not leave a truncated PNG
+        # at cache_path, or every later run would reuse the broken portrait.
+        partial_path = f"{cache_path}.{uuid.uuid4().hex}.partial"
+        with open(partial_path, "wb") as f:
             f.write(portrait_bytes)
+        os.replace(partial_path, cache_path)
 
     return _upload_input_image(cache_path, base_url)
 
