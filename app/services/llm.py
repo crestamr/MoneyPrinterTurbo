@@ -700,6 +700,60 @@ Please note that you must use English for generating video search terms; Chinese
     return search_terms
 
 
+def generate_image_prompt(search_term: str, app_config=None) -> str:
+    """Expand a short stock-search-style term into a fuller image-generation prompt.
+
+    Used by the qwen_image video source to turn short search terms (e.g.
+    "golden retriever beach") into the kind of fuller, descriptive prompt
+    Qwen-Image-2.1 produces its best results from (style, lighting,
+    composition). On any LLM failure this falls back to the raw
+    `search_term` unchanged rather than raising, so a transient LLM error
+    never blocks image generation for that segment.
+    """
+    prompt = f"""
+# Role: Image Generation Prompt Writer
+
+## Goal:
+Expand a short search term into a single, fuller descriptive prompt for an
+AI image generator.
+
+## Constraints:
+1. reply with exactly one prompt, as plain text, nothing else.
+2. do not return a list, JSON, quotes, or any explanation.
+3. keep it to a single paragraph, 1-3 sentences.
+4. include concrete visual details: setting, lighting, composition, style.
+5. the subject of the search term must remain the clear main subject.
+6. reply in English only.
+
+## Search Term:
+{search_term}
+""".strip()
+
+    try:
+        if app_config is None:
+            response = _generate_response(prompt)
+        else:
+            response = _generate_response(prompt, app_config=app_config)
+    except Exception as e:
+        logger.warning(
+            f"failed to expand image prompt, using raw search term: "
+            f"term={search_term!r}, error={str(e)}"
+        )
+        return search_term
+
+    if response.startswith("Error: "):
+        logger.warning(
+            f"failed to expand image prompt, using raw search term: "
+            f"term={search_term!r}, response={response}"
+        )
+        return search_term
+
+    expanded = response.strip().strip('"')
+    if not expanded:
+        return search_term
+    return expanded
+
+
 # =============================================================================
 # Social publishing metadata
 #

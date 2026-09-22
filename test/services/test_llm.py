@@ -1676,5 +1676,36 @@ class TestLiteLLMLiveIntegration(unittest.TestCase):
         self.assertIn("4", result)
 
 
+class TestGenerateImagePrompt(unittest.TestCase):
+    def test_expands_search_term_into_a_richer_prompt(self):
+        with patch(
+            "app.services.llm._generate_response",
+            return_value="a golden retriever sprinting across a sunlit beach, "
+            "waves in the background, shallow depth of field, photorealistic",
+        ):
+            result = llm.generate_image_prompt("golden retriever beach")
+
+        self.assertIn("golden retriever", result.lower())
+        self.assertGreater(len(result), len("golden retriever beach"))
+
+    def test_falls_back_to_the_raw_search_term_on_llm_error(self):
+        with patch(
+            "app.services.llm._generate_response",
+            return_value="Error: provider unavailable",
+        ):
+            result = llm.generate_image_prompt("golden retriever beach")
+
+        self.assertEqual(result, "golden retriever beach")
+
+    def test_falls_back_to_the_raw_search_term_on_exception(self):
+        with patch(
+            "app.services.llm._generate_response",
+            side_effect=RuntimeError("boom"),
+        ):
+            result = llm.generate_image_prompt("golden retriever beach")
+
+        self.assertEqual(result, "golden retriever beach")
+
+
 if __name__ == "__main__":
     unittest.main()
