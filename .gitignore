@@ -36,6 +36,7 @@ debug_*.py
 test_*.py
 !test/services/test_*.py
 !test/test_*.py
+!services/omnivoice_server/tests/test_*.py
 streamlit.log
 .coverage
 coverage.xml

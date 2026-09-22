@@ -1,0 +1,6 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+omnivoice
+torch>=2.8.0
+soundfile>=0.12
+numpy
