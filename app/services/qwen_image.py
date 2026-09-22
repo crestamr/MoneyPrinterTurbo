@@ -30,6 +30,7 @@ DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 DEFAULT_POLL_TIMEOUT_SECONDS = 180.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
+DEFAULT_HOST_DESCRIPTION = "a friendly presenter"
 
 
 class QwenImageError(RuntimeError):
@@ -103,6 +104,67 @@ def _build_plain_t2i_graph(
                 "positive": ["4", 0],
                 "negative": ["4", 1],
                 "latent_image": ["5", 0],
+                "seed": seed,
+                "steps": steps,
+                "cfg": 1,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "denoise": 1,
+            },
+        },
+        "7": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["6", 0], "vae": ["3", 0]},
+        },
+        "8": {
+            "class_type": "SaveImage",
+            "inputs": {"images": ["7", 0], "filename_prefix": "qwen_image_mpt"},
+        },
+    }
+
+
+def _build_host_reference_graph(
+    prompt: str, host_image_filename: str, width: int, height: int, steps: int, seed: int
+) -> dict:
+    unet_name = str(
+        config.qwen_image.get("unet_name", DEFAULT_UNET_NAME) or DEFAULT_UNET_NAME
+    )
+    clip_name = str(
+        config.qwen_image.get("clip_name", DEFAULT_CLIP_NAME) or DEFAULT_CLIP_NAME
+    )
+    vae_name = str(
+        config.qwen_image.get("vae_name", DEFAULT_VAE_NAME) or DEFAULT_VAE_NAME
+    )
+    return {
+        "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": unet_name}},
+        "2": {
+            "class_type": "CLIPLoader",
+            "inputs": {
+                "clip_name": clip_name,
+                "type": "qwen_image",
+                "device": "default",
+            },
+        },
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": vae_name}},
+        "9": {"class_type": "LoadImage", "inputs": {"image": host_image_filename}},
+        "4": {
+            "class_type": "TextEncodeQwenImage21",
+            "inputs": {
+                "clip": ["2", 0],
+                "vae": ["3", 0],
+                "prompt": prompt,
+                "negative_prompt": "",
+                "resolution": max(width, height),
+                "images.image_1": ["9", 0],
+            },
+        },
+        "6": {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": ["1", 0],
+                "positive": ["4", 0],
+                "negative": ["4", 1],
+                "latent_image": ["4", 2],
                 "seed": seed,
                 "steps": steps,
                 "cfg": 1,
@@ -209,6 +271,70 @@ def _fetch_output_image(history_entry: dict, base_url: str) -> bytes:
     raise QwenImageAPIError("ComfyUI history entry has no output image")
 
 
+def _upload_input_image(local_path: str, base_url: str) -> str:
+    with open(local_path, "rb") as f:
+        response = requests.post(
+            f"{base_url}/upload/image",
+            files={"image": f},
+            timeout=(DEFAULT_CONNECT_TIMEOUT_SECONDS, DEFAULT_REQUEST_TIMEOUT_SECONDS),
+        )
+    if response.status_code != 200:
+        raise QwenImageAPIError(
+            f"ComfyUI rejected the image upload: HTTP {response.status_code}: "
+            f"{str(getattr(response, 'text', ''))[:200]}"
+        )
+    response_json = response.json()
+    if not isinstance(response_json, dict):
+        raise QwenImageAPIError(
+            f"ComfyUI /upload/image response was not an object: {response_json}"
+        )
+    name = response_json.get("name")
+    if not name:
+        raise QwenImageAPIError(
+            f"ComfyUI /upload/image response missing name: {response_json}"
+        )
+    return str(name)
+
+
+def _get_host_reference_filename(
+    base_url: str, steps: float, poll_interval: float, poll_timeout: float
+) -> str:
+    host_reference_image = str(
+        config.qwen_image.get("host_reference_image", "") or ""
+    ).strip()
+
+    if host_reference_image:
+        if not os.path.isfile(host_reference_image):
+            raise QwenImageError(
+                f"configured host_reference_image does not exist: "
+                f"{host_reference_image!r}"
+            )
+        return _upload_input_image(host_reference_image, base_url)
+
+    host_description = str(
+        config.qwen_image.get("host_description", DEFAULT_HOST_DESCRIPTION)
+        or DEFAULT_HOST_DESCRIPTION
+    )
+    cache_dir = utils.storage_dir("qwen_image_host_cache", create=True)
+    cache_path = os.path.join(cache_dir, f"{utils.md5(host_description)}.png")
+
+    if not os.path.isfile(cache_path):
+        portrait_prompt = (
+            f"portrait photo of {host_description}, looking at camera, "
+            f"studio lighting, photorealistic"
+        )
+        seed = random.randint(0, 2**31 - 1)
+        graph = _build_plain_t2i_graph(
+            prompt=portrait_prompt, width=1024, height=1024, steps=int(steps), seed=seed
+        )
+        entry = _submit_and_wait(graph, base_url, poll_interval, poll_timeout)
+        portrait_bytes = _fetch_output_image(entry, base_url)
+        with open(cache_path, "wb") as f:
+            f.write(portrait_bytes)
+
+    return _upload_input_image(cache_path, base_url)
+
+
 def generate_images_qwen(
     search_term: str,
     minimum_duration: int,
@@ -242,15 +368,38 @@ def generate_images_qwen(
     width = _round_to_multiple_of_32(width)
     height = _round_to_multiple_of_32(height)
 
+    use_consistent_host = bool(config.qwen_image.get("use_consistent_host", False))
+
     expanded_prompt = llm.generate_image_prompt(search_term)
     seed = random.randint(0, 2**31 - 1)
 
     logger.info(f"generating image with Qwen-Image-2.1: term={search_term!r}")
 
     try:
-        graph = _build_plain_t2i_graph(
-            prompt=expanded_prompt, width=width, height=height, steps=steps, seed=seed
-        )
+        if use_consistent_host:
+            host_image_filename = _get_host_reference_filename(
+                base_url, steps, poll_interval, poll_timeout
+            )
+            prompt = (
+                f"The person in <image1>, {expanded_prompt}, "
+                f"preserve facial identity and appearance."
+            )
+            graph = _build_host_reference_graph(
+                prompt=prompt,
+                host_image_filename=host_image_filename,
+                width=width,
+                height=height,
+                steps=steps,
+                seed=seed,
+            )
+        else:
+            graph = _build_plain_t2i_graph(
+                prompt=expanded_prompt,
+                width=width,
+                height=height,
+                steps=steps,
+                seed=seed,
+            )
         entry = _submit_and_wait(graph, base_url, poll_interval, poll_timeout)
         image_bytes = _fetch_output_image(entry, base_url)
     except QwenImageError as exc:
