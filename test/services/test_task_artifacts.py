@@ -41,7 +41,9 @@ class TestTaskArtifacts(unittest.TestCase):
                 }
             ],
         )
-        payload = json.loads((self.task_dir / "script.json").read_text())
+        payload = json.loads(
+            (self.task_dir / "script.json").read_text(encoding="utf-8")
+        )
 
         self.assertTrue(updated)
         self.assertEqual(payload["script"], original["script"])
@@ -65,7 +67,9 @@ class TestTaskArtifacts(unittest.TestCase):
                 "params": params,
             },
         )
-        payload = json.loads((self.task_dir / "script.json").read_text())
+        payload = json.loads(
+            (self.task_dir / "script.json").read_text(encoding="utf-8")
+        )
 
         self.assertEqual(payload["params"]["video_subject"], "test subject")
         self.assertEqual(payload["params"]["video_terms"], ["city", "night"])

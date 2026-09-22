@@ -66,7 +66,9 @@ def render_batch(tmp_path):
                 "subtitle.srt" if subtitle_enabled else "", duration,
             )
         return SimpleNamespace(
-            selections=json.loads(manifest.read_text()).get("material_selections", []),
+            selections=json.loads(manifest.read_text(encoding="utf-8")).get(
+                "material_selections", []
+            ),
             warnings=result[2], outputs=result[0], final_render=final_render,
         )
     return run
