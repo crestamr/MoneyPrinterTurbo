@@ -67,6 +67,16 @@ class Engine:
             self._last_used = self._clock()
             return self._model
 
+    def touch(self) -> None:
+        """Mark the model as used now, so a long synthesis is not swept away.
+
+        ``model`` stamps the timestamp when the model is *acquired*; a synthesis
+        that runs longer than the idle timeout would otherwise be swept out from
+        under itself. Callers touch again once the work is done.
+        """
+        with self._lock:
+            self._last_used = self._clock()
+
     def unload(self) -> bool:
         """Drop the model. Returns whether anything was actually unloaded."""
         with self._lock:

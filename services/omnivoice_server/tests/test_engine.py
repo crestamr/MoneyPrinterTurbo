@@ -55,6 +55,15 @@ class TestEngineLifecycle(unittest.TestCase):
         self.eng.sweep_idle()
         self.assertTrue(self.eng.is_loaded)
 
+    def test_touch_keeps_a_long_running_synthesis_from_being_swept(self):
+        with patch.object(engine, "_load_model", return_value=MagicMock()):
+            self.eng.model
+        # A synthesis that outlives the idle timeout still ends with a touch.
+        self.clock[0] += 61
+        self.eng.touch()
+        self.eng.sweep_idle()
+        self.assertTrue(self.eng.is_loaded)
+
     def test_idle_sweep_is_disabled_when_timeout_is_zero(self):
         eng = engine.Engine(
             model_id="k2-fsa/OmniVoice",
