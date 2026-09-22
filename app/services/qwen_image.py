@@ -176,9 +176,18 @@ def _submit_and_wait(
 
 
 def _fetch_output_image(history_entry: dict, base_url: str) -> bytes:
-    outputs = history_entry.get("outputs", {})
+    outputs = history_entry.get("outputs")
+    if not isinstance(outputs, dict):
+        raise QwenImageAPIError("ComfyUI history entry has no outputs")
     for node_output in outputs.values():
-        for image_info in node_output.get("images", []):
+        if not isinstance(node_output, dict):
+            continue
+        images = node_output.get("images")
+        if not isinstance(images, list):
+            continue
+        for image_info in images:
+            if not isinstance(image_info, dict):
+                continue
             filename = image_info.get("filename")
             if not filename:
                 continue

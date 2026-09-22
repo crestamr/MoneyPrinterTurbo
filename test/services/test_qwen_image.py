@@ -152,6 +152,38 @@ class TestGenerateImagesQwen(unittest.TestCase):
 
         self.assertEqual(results, [])
 
+    def test_generate_images_qwen_returns_empty_list_on_malformed_outputs(self):
+        queue_response = SimpleNamespace(
+            status_code=200, json=lambda: {"prompt_id": "prompt-abc"}
+        )
+        history_response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "prompt-abc": {
+                    "status": {"completed": True, "status_str": "success"},
+                    "outputs": {"8": "done", "9": {"images": ["not-a-dict"]}},
+                }
+            },
+        )
+
+        with patch(
+            "app.services.qwen_image.requests.post",
+            return_value=queue_response,
+        ), patch(
+            "app.services.qwen_image.requests.get",
+            return_value=history_response,
+        ), patch(
+            "app.services.qwen_image.llm.generate_image_prompt",
+            return_value="a golden retriever running on a sunlit beach",
+        ):
+            results = qwen_image.generate_images_qwen(
+                search_term="golden retriever beach",
+                minimum_duration=5,
+                video_aspect=VideoAspect.portrait,
+            )
+
+        self.assertEqual(results, [])
+
     def test_generate_images_qwen_returns_empty_list_on_generation_error(self):
         queue_response = SimpleNamespace(
             status_code=200, json=lambda: {"prompt_id": "prompt-abc"}
