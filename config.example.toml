@@ -638,6 +638,23 @@ model_id = "kokoro"
 # from the server (GET {base_url}/audio/voices).
 voices = []
 
+[omnivoice]
+# Local OmniVoice TTS (k2-fsa/OmniVoice, Apache-2.0 code and weights).
+# Fully local and free, with zero-shot voice cloning: drop 3-10 second
+# reference clips into storage/voices/ and each becomes a selectable voice.
+# Requires the wrapper service — start it with omnivoice.bat / omnivoice.sh.
+# Like Kokoro and Chatterbox this returns no word-level timestamps, so set
+# subtitle_provider = "whisper" above for tighter subtitle sync.
+base_url = "http://127.0.0.1:8890/v1"
+api_key = ""
+model_id = "omnivoice"
+# Empty uses storage/voices.
+voices_dir = ""
+# Diffusion steps: 32 is the default quality, 16 is roughly twice as fast.
+num_step = 32
+# Unload the model after this many idle seconds to free VRAM (0 = never).
+idle_unload_seconds = 600
+
 [fish_audio]
 # Fish Audio TTS service: https://fish.audio
 # API key: https://fish.audio/app/developers

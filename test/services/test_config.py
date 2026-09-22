@@ -347,6 +347,35 @@ class TestConfigPersistence:
             config._cfg.clear()
             config._cfg.update(original_cfg)
 
+    def test_omnivoice_section_round_trips_through_save_config(self):
+        """[omnivoice] 配置节应能通过 save_config() 正确写回磁盘。"""
+        original_cfg = dict(config._cfg)
+        original_omnivoice = dict(config.omnivoice)
+        try:
+            with TemporaryDirectory() as temp_dir:
+                config_path = Path(temp_dir) / "config.toml"
+                config_path.write_text("[app]\nvideo_source = \"pexels\"\n", encoding="utf-8")
+                config.omnivoice["base_url"] = "http://127.0.0.1:8890/v1"
+                config.omnivoice["num_step"] = 16
+
+                with (
+                    patch.object(config, "root_dir", temp_dir),
+                    patch.object(config, "config_file", str(config_path)),
+                ):
+                    config.save_config()
+
+                saved_config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+                assert (
+                    saved_config["omnivoice"]["base_url"]
+                    == "http://127.0.0.1:8890/v1"
+                )
+                assert saved_config["omnivoice"]["num_step"] == 16
+        finally:
+            config.omnivoice.clear()
+            config.omnivoice.update(original_omnivoice)
+            config._cfg.clear()
+            config._cfg.update(original_cfg)
+
     def test_runtime_config_lock_blocks_concurrent_config_writes(self):
         """长任务持有运行锁时，其它会话不能在任务中途改写全局配置。"""
         write_started = threading.Event()
