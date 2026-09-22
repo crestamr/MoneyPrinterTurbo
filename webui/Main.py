@@ -5104,6 +5104,11 @@ def _render_generation_controls(
             st.error(tr("Please Enter the Coverr API Key"))
             st.stop()
 
+        # Unlike the three checks above, this deliberately calls the resolver
+        # instead of a direct config.app.get(...) lookup: MiniMax's key can come
+        # from [minimax_video].api_key, the shared app.minimax_api_key (LLM
+        # provider) fallback, or $MINIMAX_API_KEY. A flat config lookup here
+        # would silently break the fallback and block users who rely on it.
         if (
             params.video_source == "minimax"
             and not minimax_video.get_minimax_video_api_key()
