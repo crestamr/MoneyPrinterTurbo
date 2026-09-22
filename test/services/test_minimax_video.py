@@ -1,4 +1,6 @@
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -458,6 +460,98 @@ class TestMiniMaxPollTask(unittest.TestCase):
                     poll_interval_seconds=1.0,
                     poll_timeout_seconds=10.0,
                 )
+
+
+class TestMiniMaxGenerateVideos(unittest.TestCase):
+    def setUp(self):
+        self.original_app_config = dict(config.app)
+        self.original_minimax_video_config = dict(config.minimax_video)
+        self.temp_dir = tempfile.mkdtemp()
+        self.patched_storage_dir = patch(
+            "app.services.minimax_video.utils.storage_dir",
+            return_value=self.temp_dir,
+        )
+        self.patched_storage_dir.start()
+
+    def tearDown(self):
+        self.patched_storage_dir.stop()
+        config.app.clear()
+        config.app.update(self.original_app_config)
+        config.minimax_video.clear()
+        config.minimax_video.update(self.original_minimax_video_config)
+
+    def test_generate_videos_minimax_happy_path(self):
+        config.minimax_video["api_key"] = "test-key"
+        config.minimax_video["model"] = "MiniMax-H3"
+        config.minimax_video["resolution"] = "768P"
+        config.minimax_video["poll_interval_seconds"] = 0.01
+        config.minimax_video["poll_timeout_seconds"] = 5
+
+        create_response = SimpleNamespace(
+            status_code=200, json=lambda: {"task_id": "task-xyz"}
+        )
+        poll_response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "task": {
+                    "status": "succeeded",
+                    "content": {"url": "https://cdn.example.com/video.mp4"},
+                }
+            },
+        )
+        download_response = SimpleNamespace(content=b"fake-video-bytes")
+
+        with patch(
+            "app.services.minimax_video.requests.post",
+            return_value=create_response,
+        ), patch(
+            "app.services.minimax_video.requests.get",
+            side_effect=[poll_response, download_response],
+        ):
+            results = minimax_video.generate_videos_minimax(
+                search_term="golden retriever running on beach",
+                minimum_duration=5,
+                video_aspect=VideoAspect.portrait,
+            )
+
+        self.assertEqual(len(results), 1)
+        item = results[0]
+        self.assertEqual(item.provider, "minimax")
+        self.assertTrue(os.path.exists(item.url))
+        with open(item.url, "rb") as f:
+            self.assertEqual(f.read(), b"fake-video-bytes")
+        self.assertEqual(item.duration, 5)
+        self.assertEqual(item.source_info["asset_id"], "task-xyz")
+        self.assertEqual(
+            item.source_info["search_term"], "golden retriever running on beach"
+        )
+
+    def test_generate_videos_minimax_returns_empty_list_without_api_key(self):
+        config.minimax_video["api_key"] = ""
+        config.app["minimax_api_key"] = ""
+
+        results = minimax_video.generate_videos_minimax(
+            search_term="golden retriever running on beach",
+            minimum_duration=5,
+            video_aspect=VideoAspect.portrait,
+        )
+
+        self.assertEqual(results, [])
+
+    def test_generate_videos_minimax_returns_empty_list_on_api_error(self):
+        config.minimax_video["api_key"] = "test-key"
+
+        with patch(
+            "app.services.minimax_video.requests.post",
+            side_effect=minimax_video.requests.RequestException("boom"),
+        ):
+            results = minimax_video.generate_videos_minimax(
+                search_term="golden retriever running on beach",
+                minimum_duration=5,
+                video_aspect=VideoAspect.portrait,
+            )
+
+        self.assertEqual(results, [])
 
 
 if __name__ == "__main__":

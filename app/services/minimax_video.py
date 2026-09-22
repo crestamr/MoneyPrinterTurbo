@@ -15,6 +15,8 @@ import requests
 from loguru import logger
 
 from app.config import config
+from app.models.schema import MaterialInfo, VideoAspect
+from app.utils import utils
 
 MINIMAX_VIDEO_GLOBAL_BASE_URL = "https://api.minimax.io"
 MINIMAX_VIDEO_CN_BASE_URL = "https://api.minimaxi.com"
@@ -321,3 +323,119 @@ def _poll_task(
             )
 
         time.sleep(poll_interval_seconds)
+
+
+def _download_to_cache(content_url: str, task_id: str) -> str:
+    """Download a MiniMax presigned content URL to a durable local cache file.
+
+    MiniMax's ``content.url`` is a presigned link that expires in roughly 9
+    hours. This app's material search cache persists entries for up to 24
+    hours, so caching the presigned URL directly would let the cache outlive
+    the URL. Downloading immediately to a stable local path sidesteps this:
+    the local path -- not the presigned URL -- is what gets cached.
+    """
+    cache_dir = utils.storage_dir("cache_videos", create=True)
+    destination = os.path.join(cache_dir, f"minimax-{task_id}.mp4")
+    if os.path.exists(destination) and os.path.getsize(destination) > 0:
+        return destination
+
+    try:
+        response = requests.get(content_url, timeout=(10.0, 240.0))
+    except requests.RequestException as exc:
+        logger.error(
+            f"MiniMax video download failed: task_id={task_id}, "
+            f"error={type(exc).__name__}"
+        )
+        raise MiniMaxVideoAPIError(
+            f"MiniMax video download failed: {type(exc).__name__}"
+        ) from exc
+
+    with open(destination, "wb") as f:
+        f.write(response.content)
+    return destination
+
+
+def generate_videos_minimax(
+    search_term: str,
+    minimum_duration: int,
+    video_aspect: VideoAspect = VideoAspect.portrait,
+) -> list[MaterialInfo]:
+    """Generate a single MiniMax H3 video clip for search_term.
+
+    This is the public entry point for the MiniMax H3 video-generation
+    provider, matching the calling convention of this codebase's other
+    video-material-provider functions (search_videos_pexels,
+    search_videos_pixabay, search_videos_coverr in app/services/material.py)
+    so it can be plugged directly into material.py's provider dispatch.
+
+    On any failure (missing API key, or any MiniMaxVideoError raised while
+    creating/polling/downloading the task) this logs the failure and returns
+    an empty list rather than raising, matching how the other provider
+    functions degrade gracefully instead of crashing the whole video
+    generation task.
+    """
+    aspect = VideoAspect(video_aspect)
+    api_key = get_minimax_video_api_key()
+    if not api_key:
+        logger.error(
+            "MiniMax video generation is not configured: set [minimax_video].api_key "
+            "or app.minimax_api_key in config.toml"
+        )
+        return []
+
+    base_url = get_minimax_video_base_url()
+    model = str(config.minimax_video.get("model", DEFAULT_MODEL) or DEFAULT_MODEL)
+    resolution = str(
+        config.minimax_video.get("resolution", DEFAULT_RESOLUTION)
+        or DEFAULT_RESOLUTION
+    )
+    poll_interval_seconds = float(
+        config.minimax_video.get(
+            "poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS
+        )
+    )
+    poll_timeout_seconds = float(
+        config.minimax_video.get("poll_timeout_seconds", DEFAULT_POLL_TIMEOUT_SECONDS)
+    )
+    duration = _clamp_duration(minimum_duration, model=model)
+    ratio = _aspect_to_ratio(aspect)
+    prompt = _build_prompt(search_term)
+
+    logger.info(f"generating video with MiniMax {model}: term={search_term!r}")
+
+    try:
+        task_id = _create_task(
+            prompt=prompt,
+            resolution=resolution,
+            duration=duration,
+            ratio=ratio,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+        )
+        content_url = _poll_task(
+            task_id=task_id,
+            api_key=api_key,
+            base_url=base_url,
+            poll_interval_seconds=poll_interval_seconds,
+            poll_timeout_seconds=poll_timeout_seconds,
+        )
+        local_path = _download_to_cache(content_url, task_id)
+    except MiniMaxVideoError as exc:
+        logger.error(
+            f"MiniMax video generation failed: term={search_term!r}, "
+            f"error={type(exc).__name__}, detail={exc}"
+        )
+        return []
+
+    item = MaterialInfo()
+    item.provider = "minimax"
+    item.url = local_path
+    item.duration = duration
+    item.source_info = {
+        "provider": "minimax",
+        "search_term": search_term,
+        "asset_id": task_id,
+        "rendition": {"id": model, "width": None, "height": None},
+    }
+    return [item]
