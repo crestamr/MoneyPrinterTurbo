@@ -1639,5 +1639,89 @@ class TestConfigurableMinMaterialDimension(unittest.TestCase):
                 )
 
 
+class TestPlanClipDurations(unittest.TestCase):
+    """切点必须贴着句子边界走，否则画面会在半句话中间突然切换。"""
+
+    def test_without_boundaries_falls_back_to_fixed_durations(self):
+        result = vd.plan_clip_durations(
+            [], max_clip_duration=5, total_duration=12, tolerance=1.0
+        )
+        self.assertEqual(result[:2], [5, 5])
+        self.assertAlmostEqual(sum(result), 12, places=6)
+
+    def test_snaps_a_cut_to_a_nearby_sentence_boundary(self):
+        # Natural cut at 5.0; a sentence ends at 5.4, inside the tolerance.
+        result = vd.plan_clip_durations(
+            [5.4, 11.0], max_clip_duration=5, total_duration=11, tolerance=1.0
+        )
+        self.assertAlmostEqual(result[0], 5.4, places=6)
+
+    def test_ignores_a_boundary_outside_the_tolerance(self):
+        # Nearest boundary at 7.0 is 2.0s from the natural cut at 5.0.
+        result = vd.plan_clip_durations(
+            [7.0], max_clip_duration=5, total_duration=10, tolerance=1.0
+        )
+        self.assertAlmostEqual(result[0], 5.0, places=6)
+
+    def test_zero_tolerance_disables_snapping(self):
+        result = vd.plan_clip_durations(
+            [5.2], max_clip_duration=5, total_duration=10, tolerance=0.0
+        )
+        self.assertAlmostEqual(result[0], 5.0, places=6)
+
+    def test_never_emits_a_non_positive_duration(self):
+        result = vd.plan_clip_durations(
+            [0.0, 0.1, 5.0], max_clip_duration=5, total_duration=15, tolerance=2.0
+        )
+        self.assertTrue(all(duration > 0 for duration in result))
+
+    def test_never_exceeds_max_plus_tolerance(self):
+        result = vd.plan_clip_durations(
+            [5.9, 11.8], max_clip_duration=5, total_duration=12, tolerance=1.0
+        )
+        self.assertTrue(all(duration <= 6.0 + 1e-6 for duration in result))
+
+    def test_covers_the_requested_total_duration(self):
+        result = vd.plan_clip_durations(
+            [3.0, 9.0], max_clip_duration=5, total_duration=20, tolerance=1.0
+        )
+        self.assertGreaterEqual(sum(result) + 1e-6, 20)
+
+    def test_sanitises_unsorted_and_invalid_boundaries(self):
+        result = vd.plan_clip_durations(
+            [11.0, -2.0, 5.4, 5.4, 0.0],
+            max_clip_duration=5,
+            total_duration=11,
+            tolerance=1.0,
+        )
+        self.assertAlmostEqual(result[0], 5.4, places=6)
+
+    def test_prefers_a_forward_boundary_over_a_nearer_passed_one(self):
+        # 容差大于片段时长时，离切点最近的边界可能已经被上一段用掉（落在当前
+        # 位置之前）。这种情况下应该退而求其次选仍然向前的边界，而不是因为最近
+        # 的那个不可用就整体放弃对齐。
+        # 第一段切到 3.6；第二段的自然切点 8.6 离 3.6 只有 5.0，离 14.5 有 5.9，
+        # 两者都在 6.0 容差内，但只有 14.5 能让画面继续往前走。
+        result = vd.plan_clip_durations(
+            [3.6, 14.5], max_clip_duration=5, total_duration=30, tolerance=6.0
+        )
+        self.assertAlmostEqual(result[0], 3.6, places=6)
+        self.assertAlmostEqual(result[1], 10.9, places=6)
+
+    def test_returns_nothing_for_non_positive_inputs(self):
+        self.assertEqual(
+            vd.plan_clip_durations(
+                [3.0], max_clip_duration=0, total_duration=10, tolerance=1.0
+            ),
+            [],
+        )
+        self.assertEqual(
+            vd.plan_clip_durations(
+                [3.0], max_clip_duration=5, total_duration=0, tolerance=1.0
+            ),
+            [],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

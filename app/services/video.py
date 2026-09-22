@@ -189,6 +189,54 @@ def _get_required_video_duration(audio_duration: float) -> float:
     return max(0.0, float(audio_duration) + _VIDEO_DURATION_SAFETY_MARGIN)
 
 
+def plan_clip_durations(
+    boundaries: List[float],
+    *,
+    max_clip_duration: float,
+    total_duration: float,
+    tolerance: float,
+) -> List[float]:
+    """Plan how long each clip should stay on screen.
+
+    Cuts default to ``max_clip_duration`` apart, but move to a nearby subtitle
+    boundary when one is within ``tolerance``, so visuals change between
+    sentences instead of mid-phrase. With no boundaries, or ``tolerance`` 0,
+    this returns evenly spaced durations — the original fixed-interval
+    behaviour. The planned durations always sum to ``total_duration``.
+    """
+    max_clip_duration = float(max_clip_duration)
+    total_duration = float(total_duration)
+    tolerance = max(0.0, float(tolerance))
+    if max_clip_duration <= 0 or total_duration <= 0:
+        return []
+
+    # 字幕时间可能来自不同来源，顺序和有效性都不保证；这里统一清洗，
+    # 避免无效边界让切点回退或产生零长片段。
+    clean_boundaries = sorted(
+        {float(value) for value in boundaries or [] if float(value) > 0}
+    )
+
+    durations: List[float] = []
+    position = 0.0
+    while position < total_duration - 1e-6:
+        natural_cut = position + max_clip_duration
+        cut = natural_cut
+        if tolerance > 0 and clean_boundaries:
+            # 只在仍然向前的边界里挑选：已经被上一段用掉的边界即使离切点更近，
+            # 吸附过去也会得到零长甚至负长片段，让整个计划原地打转。
+            forward = [value for value in clean_boundaries if value > position]
+            if forward:
+                candidate = min(forward, key=lambda value: abs(value - natural_cut))
+                if abs(candidate - natural_cut) <= tolerance:
+                    cut = candidate
+        # 片段计划服务于“画面必须铺满旁白”这一目标，超出部分没有音频可配，
+        # 因此最后一段按总时长截断，保证各段时长之和正好等于 total_duration。
+        cut = min(cut, total_duration)
+        durations.append(cut - position)
+        position = cut
+    return durations
+
+
 def get_min_material_dimension() -> int:
     """
     返回素材最小边长阈值（像素），默认 `_MIN_MATERIAL_DIMENSION`。
