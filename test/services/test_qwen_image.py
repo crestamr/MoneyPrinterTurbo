@@ -447,6 +447,22 @@ class TestGenerateImagesQwenWithHost(unittest.TestCase):
         self.assertEqual(results, [])
         mock_post.assert_not_called()
 
+    def test_returns_empty_list_when_host_portrait_cache_write_fails(self):
+        with patch(
+            "app.services.qwen_image._get_host_reference_filename",
+            side_effect=PermissionError("cache directory is read-only"),
+        ), patch(
+            "app.services.qwen_image.llm.generate_image_prompt",
+            return_value="a golden retriever running on a sunlit beach",
+        ):
+            results = qwen_image.generate_images_qwen(
+                search_term="golden retriever beach",
+                minimum_duration=5,
+                video_aspect=VideoAspect.portrait,
+            )
+
+        self.assertEqual(results, [])
+
 
 if __name__ == "__main__":
     unittest.main()

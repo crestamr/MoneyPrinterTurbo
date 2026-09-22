@@ -414,19 +414,26 @@ def generate_images_qwen(
             f"error={type(exc).__name__}, detail={exc}"
         )
         return []
-
-    cache_dir = utils.storage_dir("qwen_image_generated", create=True)
-    image_path = os.path.join(cache_dir, f"qwen-{uuid.uuid4().hex}.png")
-    with open(image_path, "wb") as f:
-        f.write(image_bytes)
+    except OSError as exc:
+        # requests.RequestException subclasses OSError, so it must stay above;
+        # this catches local file failures such as writing the host-portrait cache.
+        logger.error(
+            f"Qwen-Image generation failed on local file I/O: "
+            f"term={search_term!r}, error={type(exc).__name__}, detail={exc}"
+        )
+        return []
 
     try:
+        cache_dir = utils.storage_dir("qwen_image_generated", create=True)
+        image_path = os.path.join(cache_dir, f"qwen-{uuid.uuid4().hex}.png")
+        with open(image_path, "wb") as f:
+            f.write(image_bytes)
         video_path = video.render_image_as_zoom_clip(
             image_path, duration=minimum_duration
         )
     except Exception as exc:
         logger.error(
-            f"failed to render Qwen-Image output as a video clip: "
+            f"failed to save or render Qwen-Image output as a video clip: "
             f"term={search_term!r}, error={type(exc).__name__}, detail={exc}"
         )
         return []
