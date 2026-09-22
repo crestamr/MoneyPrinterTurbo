@@ -120,7 +120,9 @@ OMNIVOICE_PYTHON="$PWD/.venv-omnivoice/bin/python" ./omnivoice.sh
 Without that variable the scripts fall back to the repository's `.venv` and then
 to `python` on `PATH`.
 
-Any arguments you pass to the script are forwarded to the service:
+Any arguments you pass to the script are forwarded to the service. The defaults
+below apply unless `config.toml` overrides them — see
+[Point the app at it](#point-the-app-at-it):
 
 | Flag | Default | Notes |
 | --- | --- | --- |
@@ -174,12 +176,24 @@ Then in the WebUI, under **Audio Settings**, set the TTS server to
 calling `/v1/audio/voices`, so the service must be running when you open that
 page.
 
-> **Note:** the `[omnivoice]` section also carries `voices_dir`, `num_step`, and
-> `idle_unload_seconds`. Those three document the service's behaviour, but the
-> app does not read them and does not forward them — the service only sees the
-> `--voices-dir`, `--num-step`, and `--idle-unload-seconds` flags you pass on the
-> command line. If you change them in `config.toml`, change the launch flags to
-> match. Only `base_url`, `api_key`, and `model_id` affect the client.
+The `[omnivoice]` section also carries `voices_dir`, `num_step`, and
+`idle_unload_seconds`. Those configure **this service**, not the client: on
+startup it reads `config.toml` from the repository root and uses them as its
+defaults, so setting `num_step = 16` there is enough — no launch flag needed.
+
+Resolution order, highest first:
+
+1. a flag you passed on the command line,
+2. `$OMNIVOICE_API_KEY` (for `--api-key` only),
+3. the `[omnivoice]` value in `config.toml`,
+4. the built-in default from the table above.
+
+`api_key` is read by both sides, which is what keeps them in agreement. An empty
+value means "not set", so `voices_dir = ""` falls back to `storage/voices`.
+`base_url` and `model_id` are client-only — the service never reads them, and it
+deliberately ignores `model_id` because there it means the name the client puts
+in the request payload (`omnivoice`), not the Hugging Face weights repo. A
+missing or malformed `config.toml` is ignored and the service still starts.
 
 ## Subtitles
 
@@ -253,8 +267,9 @@ startup, read its output — a missing `torch` or a CUDA mismatch shows up there
 `storage/voices/` is empty, or holds nothing with a supported extension. Confirm
 with `curl http://127.0.0.1:8890/v1/audio/voices` — an empty list means the
 service sees no clips. Check you are looking at the directory the service is
-actually using: it prints `reference clips: <path>` on startup, and that path
-comes from `--voices-dir`, not from `config.toml`.
+actually using: it prints `reference clips: <path>` on startup, resolved from
+`--voices-dir`, then `[omnivoice] voices_dir` in `config.toml`, then the
+default.
 
 **CUDA out of memory**
 

@@ -646,8 +646,12 @@ voices = []
 # Like Kokoro and Chatterbox this returns no word-level timestamps, so set
 # subtitle_provider = "whisper" above for tighter subtitle sync.
 base_url = "http://127.0.0.1:8890/v1"
+# Shared with the service, which also reads it from here. Empty disables auth.
 api_key = ""
 model_id = "omnivoice"
+# The three keys below configure the wrapper service: it reads them from this
+# file on startup, and flags passed to omnivoice.bat / omnivoice.sh win over
+# them.
 # Empty uses storage/voices.
 voices_dir = ""
 # Diffusion steps: 32 is the default quality, 16 is roughly twice as fast.
