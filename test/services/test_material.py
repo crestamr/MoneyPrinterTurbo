@@ -1211,6 +1211,126 @@ class TestMinimaxLocalFileHandling(unittest.TestCase):
         self.assertEqual(call_terms, ["a", "b"])
         self.assertEqual(len(paths), 2)
 
+    def test_download_videos_dispatches_to_qwen_image_for_qwen_image_source(self):
+        fake_item = material.MaterialInfo()
+        fake_item.provider = "qwen_image"
+        fake_item.url = "https://cdn.example.com/should-not-be-used-directly.mp4"
+        fake_item.duration = 5
+        fake_item.source_info = {"provider": "qwen_image", "search_term": "cats"}
+
+        with patch(
+            "app.services.material.qwen_image.generate_images_qwen",
+            return_value=[fake_item],
+        ) as generate_mock, patch(
+            "app.services.material.save_video",
+            return_value="/tmp/fake-saved-video.mp4",
+        ), patch(
+            "app.services.material.material_cache.load_material_search_cache",
+            return_value=None,
+        ), patch(
+            "app.services.material.material_cache.save_material_search_cache",
+        ):
+            paths = material.download_videos(
+                task_id="test-task",
+                search_terms=["cats"],
+                source="qwen_image",
+                audio_duration=5.0,
+                max_clip_duration=5,
+            )
+
+        generate_mock.assert_called_once()
+        self.assertEqual(generate_mock.call_args.kwargs["search_term"], "cats")
+        self.assertEqual(paths, ["/tmp/fake-saved-video.mp4"])
+
+    def test_download_videos_stops_generating_qwen_image_clips_once_duration_covered(
+        self,
+    ):
+        """
+        Qwen-Image 与 MiniMax 一样，每次“搜索”都是一次真实的本地图像生成，
+        不是免费检索。这里有 5 个关键词，但 max_clip_duration=5、
+        audio_duration=8，只需要 2 个候选（2*5=10 >= 8）就能覆盖目标时长，
+        不应该为剩下 3 个关键词继续生成。
+        """
+        call_terms = []
+
+        def fake_generate(search_term, minimum_duration, video_aspect, **kwargs):
+            call_terms.append(search_term)
+            item = material.MaterialInfo()
+            item.provider = "qwen_image"
+            item.url = f"https://cdn.example.com/{search_term}.mp4"
+            item.duration = 5
+            item.source_info = {"provider": "qwen_image", "search_term": search_term}
+            return [item]
+
+        with patch(
+            "app.services.material.qwen_image.generate_images_qwen",
+            side_effect=fake_generate,
+        ) as generate_mock, patch(
+            "app.services.material.save_video",
+            return_value="/tmp/fake-saved-video.mp4",
+        ), patch(
+            "app.services.material.material_cache.load_material_search_cache",
+            return_value=None,
+        ), patch(
+            "app.services.material.material_cache.save_material_search_cache",
+        ):
+            paths = material.download_videos(
+                task_id="test-task-early-exit",
+                search_terms=["a", "b", "c", "d", "e"],
+                source="qwen_image",
+                audio_duration=8,
+                max_clip_duration=5,
+            )
+
+        self.assertEqual(generate_mock.call_count, 2)
+        self.assertEqual(call_terms, ["a", "b"])
+        self.assertEqual(len(paths), 2)
+        self.assertLess(generate_mock.call_count, 5)
+
+    def test_download_videos_script_order_stops_generating_qwen_image_clips_once_duration_covered(
+        self,
+    ):
+        """
+        与上一个测试相同的场景，但走 match_script_order=True 的分组轮询
+        下载路径（_download_videos_by_script_order）——该路径有独立的搜索
+        循环，必须同样在达到目标时长后立刻停止为 Qwen-Image 生成新素材。
+        """
+        call_terms = []
+
+        def fake_generate(search_term, minimum_duration, video_aspect, **kwargs):
+            call_terms.append(search_term)
+            item = material.MaterialInfo()
+            item.provider = "qwen_image"
+            item.url = f"https://cdn.example.com/{search_term}.mp4"
+            item.duration = 5
+            item.source_info = {"provider": "qwen_image", "search_term": search_term}
+            return [item]
+
+        with patch(
+            "app.services.material.qwen_image.generate_images_qwen",
+            side_effect=fake_generate,
+        ) as generate_mock, patch(
+            "app.services.material.save_video",
+            return_value="/tmp/fake-saved-video.mp4",
+        ), patch(
+            "app.services.material.material_cache.load_material_search_cache",
+            return_value=None,
+        ), patch(
+            "app.services.material.material_cache.save_material_search_cache",
+        ):
+            paths = material.download_videos(
+                task_id="test-task-script-order-early-exit",
+                search_terms=["a", "b", "c", "d", "e"],
+                source="qwen_image",
+                audio_duration=8,
+                max_clip_duration=5,
+                match_script_order=True,
+            )
+
+        self.assertEqual(generate_mock.call_count, 2)
+        self.assertEqual(call_terms, ["a", "b"])
+        self.assertEqual(len(paths), 2)
+
     def test_download_videos_pexels_still_searches_all_terms_when_duration_covered_early(
         self,
     ):
