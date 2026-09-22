@@ -1,5 +1,6 @@
 import os
 import random
+import shutil
 import threading
 from pathlib import Path
 from typing import Any, Callable, List
@@ -11,7 +12,7 @@ from moviepy.video.io.VideoFileClip import VideoFileClip
 
 from app.config import config
 from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
-from app.services import material_cache, task_artifacts
+from app.services import material_cache, minimax_video, task_artifacts
 from app.utils import utils
 
 # Thread-safe counter for API key rotation
@@ -610,6 +611,27 @@ def save_video(video_url: str, save_dir: str = "") -> str:
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
+    # Providers like MiniMax generate a video remotely, then immediately
+    # download it to a local, durable cache path (to sidestep a presigned
+    # URL expiry issue) before ever returning it as a MaterialInfo.url. For
+    # those, `video_url` is already a local file on disk -- there is nothing
+    # to fetch over the network. Reuse it by copying into `save_dir`,
+    # deduplicated by content path (same convention as the hash-based dedup
+    # below), instead of handing it to requests.get() as if it were a URL.
+    parsed_video_url = urlsplit(video_url)
+    if parsed_video_url.scheme not in ("http", "https") and os.path.isfile(video_url):
+        local_source_hash = utils.md5(os.path.abspath(video_url))
+        local_video_id = f"vid-{local_source_hash}"
+        local_video_path = f"{save_dir}/{local_video_id}.mp4"
+
+        if os.path.exists(local_video_path) and os.path.getsize(local_video_path) > 0:
+            logger.info(f"video already exists: {local_video_path}")
+            return local_video_path
+
+        shutil.copyfile(video_url, local_video_path)
+        logger.info(f"reused local video file: {video_url} => {local_video_path}")
+        return local_video_path
+
     url_without_query = video_url.split("?")[0]
     url_hash = utils.md5(url_without_query)
     video_id = f"vid-{url_hash}"
@@ -774,6 +796,9 @@ def download_videos(
     elif source == "coverr":
         provider = "coverr"
         remote_search_videos = search_videos_coverr
+    elif source == "minimax":
+        provider = "minimax"
+        remote_search_videos = minimax_video.generate_videos_minimax
 
     def search_videos(
         search_term: str,

@@ -1069,5 +1069,54 @@ class TestCoverrProvider(unittest.TestCase):
         self.assertEqual(result, ["/tmp/coverr-saved.mp4"])
 
 
+class TestMinimaxLocalFileHandling(unittest.TestCase):
+    """
+    MiniMax 视频生成后会立即把结果下载到本地路径再返回（避开预签名 URL 过期
+    问题），因此 save_video 收到的 video_url 已经是本地文件，而不是远程 URL；
+    download_videos(source="minimax") 需要正确 dispatch 到 MiniMax 的生成函数。
+    """
+
+    def test_save_video_reuses_an_existing_local_file_without_a_network_call(self):
+        with tempfile.TemporaryDirectory() as source_dir, tempfile.TemporaryDirectory() as save_dir:
+            source_path = os.path.join(source_dir, "minimax-task-abc.mp4")
+            with open(source_path, "wb") as f:
+                f.write(b"local-video-bytes")
+
+            with patch("app.services.material.requests.get") as get_mock:
+                result_path = material.save_video(source_path, save_dir=save_dir)
+
+            get_mock.assert_not_called()
+            self.assertTrue(os.path.exists(result_path))
+            self.assertEqual(os.path.dirname(result_path), save_dir)
+            with open(result_path, "rb") as f:
+                self.assertEqual(f.read(), b"local-video-bytes")
+
+    def test_download_videos_dispatches_to_minimax_for_minimax_source(self):
+        fake_item = material.MaterialInfo()
+        fake_item.provider = "minimax"
+        fake_item.url = "https://cdn.example.com/should-not-be-used-directly.mp4"
+        fake_item.duration = 5
+        fake_item.source_info = {"provider": "minimax", "search_term": "cats"}
+
+        with patch(
+            "app.services.material.minimax_video.generate_videos_minimax",
+            return_value=[fake_item],
+        ) as generate_mock, patch(
+            "app.services.material.save_video",
+            return_value="/tmp/fake-saved-video.mp4",
+        ):
+            paths = material.download_videos(
+                task_id="test-task",
+                search_terms=["cats"],
+                source="minimax",
+                audio_duration=5.0,
+                max_clip_duration=5,
+            )
+
+        generate_mock.assert_called_once()
+        self.assertEqual(generate_mock.call_args.kwargs["search_term"], "cats")
+        self.assertEqual(paths, ["/tmp/fake-saved-video.mp4"])
+
+
 if __name__ == "__main__":
     unittest.main()
