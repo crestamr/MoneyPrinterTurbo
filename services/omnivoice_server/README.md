@@ -290,3 +290,24 @@ cards, reinstall from the cu128 index (see [Install](#install)).
 
 The service encodes MP3 by shelling out to `ffmpeg`. If it is not on `PATH`, set
 `FFMPEG_BINARY` to its full path before starting the service.
+
+**Numbers and abbreviations are read out oddly (text normalization)**
+
+OmniVoice can spell out numbers, currency and abbreviations ("$12" → "twelve
+dollars") before synthesis, but that step needs `WeTextProcessing`, which is
+built on `pynini`. `pynini` publishes no Windows wheel, and its source build
+passes GCC-only flags (`-Wno-register`, `-funsigned-char`) that MSVC rejects, so
+**it cannot be installed on Windows**.
+
+The service detects this and simply skips normalization rather than failing the
+request — without the check, every synthesis returns HTTP 500 with
+`ImportError: Text normalization (normalize_text=True) requires
+WeTextProcessing`. Nothing to do on Windows; write numbers as words in the
+script if their pronunciation matters.
+
+On Linux (or WSL) you can install it and normalization switches on
+automatically, no config change needed:
+
+```bash
+pip install WeTextProcessing
+```

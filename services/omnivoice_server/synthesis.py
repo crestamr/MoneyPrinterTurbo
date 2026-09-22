@@ -7,6 +7,8 @@ reference audio and keyed by the reference's size and mtime.
 
 from __future__ import annotations
 
+import functools
+import importlib.util
 import os
 import subprocess
 import tempfile
@@ -17,6 +19,36 @@ import numpy as np
 from services.omnivoice_server.voices import Voice
 
 SAMPLE_RATE = 24000
+
+# OmniVoice's text normalizer (spelling out numbers, currency, abbreviations)
+# lives in WeTextProcessing, which is built on pynini. pynini ships no Windows
+# wheel and its source build passes GCC-only flags that MSVC rejects, so on
+# Windows these are simply absent.
+TEXT_NORMALIZATION_MODULES = ("pynini", "tn")
+
+
+def _find_spec(name: str) -> Any:
+    """Locate a module without importing it. Separate so tests can patch it."""
+    return importlib.util.find_spec(name)
+
+
+@functools.lru_cache(maxsize=1)
+def text_normalization_available() -> bool:
+    """Whether the optional text-normalization dependencies are importable.
+
+    Asking the model to normalize without them makes ``generate`` raise
+    ImportError, failing every request; detecting up front degrades to
+    un-normalized text instead, which is the only option on Windows.
+    """
+    for name in TEXT_NORMALIZATION_MODULES:
+        try:
+            if _find_spec(name) is None:
+                return False
+        except Exception:
+            # A half-installed package makes find_spec raise rather than
+            # return None. Either way it cannot be used.
+            return False
+    return True
 
 
 class SynthesisError(RuntimeError):
@@ -88,16 +120,29 @@ def _encode_mp3(samples: np.ndarray, sample_rate: int) -> bytes:
 
 
 def synthesize(
-    *, model: Any, voice: Voice, text: str, speed: float, num_step: int
+    *,
+    model: Any,
+    voice: Voice,
+    text: str,
+    speed: float,
+    num_step: int,
+    normalize_text: bool | None = None,
 ) -> bytes:
-    """Synthesize ``text`` in ``voice`` and return MP3 bytes."""
+    """Synthesize ``text`` in ``voice`` and return MP3 bytes.
+
+    ``normalize_text`` defaults to whatever the environment can actually
+    support; pass a bool to force the choice.
+    """
+    if normalize_text is None:
+        normalize_text = text_normalization_available()
+
     prompt = load_or_build_prompt(model, voice)
     chunks = model.generate(
         text=text,
         voice_clone_prompt=prompt,
         num_step=int(num_step),
         speed=float(speed),
-        normalize_text=True,
+        normalize_text=bool(normalize_text),
     )
     if not chunks:
         raise SynthesisError("OmniVoice returned no audio")

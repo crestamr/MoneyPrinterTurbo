@@ -146,5 +146,58 @@ class TestSynthesize(unittest.TestCase):
                 )
 
 
+class TestTextNormalization(unittest.TestCase):
+    """Normalization needs WeTextProcessing, which cannot install on Windows.
+
+    Asking for it anyway makes ``model.generate`` raise ImportError, which turns
+    every single request into a 500. Detect it instead of assuming it is there.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.voice = _make_voice(self.tmp)
+        synthesis.text_normalization_available.cache_clear()
+        self.addCleanup(synthesis.text_normalization_available.cache_clear)
+
+    def _synthesize(self, **kwargs):
+        model = MagicMock()
+        model.generate.return_value = [np.zeros(10, dtype=np.float32)]
+        with patch.object(
+            synthesis, "load_or_build_prompt", return_value=MagicMock()
+        ), patch.object(synthesis, "_encode_mp3", return_value=b"x"):
+            synthesis.synthesize(
+                model=model, voice=self.voice, text="Hi.", speed=1.0,
+                num_step=32, **kwargs
+            )
+        return model.generate.call_args.kwargs["normalize_text"]
+
+    def test_normalization_is_skipped_when_the_dependency_is_missing(self):
+        with patch.object(synthesis, "_find_spec", return_value=None):
+            self.assertIs(self._synthesize(), False)
+
+    def test_normalization_is_requested_when_the_dependency_is_present(self):
+        with patch.object(synthesis, "_find_spec", return_value=object()):
+            self.assertIs(self._synthesize(), True)
+
+    def test_an_explicit_choice_overrides_detection(self):
+        with patch.object(synthesis, "_find_spec", return_value=None):
+            self.assertIs(self._synthesize(normalize_text=True), True)
+        with patch.object(synthesis, "_find_spec", return_value=object()):
+            self.assertIs(self._synthesize(normalize_text=False), False)
+
+    def test_a_broken_dependency_counts_as_missing(self):
+        # pynini can be present but unimportable (a half-built source install),
+        # and find_spec surfaces that as an exception rather than None.
+        with patch.object(synthesis, "_find_spec", side_effect=ValueError("broken")):
+            self.assertIs(self._synthesize(), False)
+
+    def test_detection_requires_every_dependency(self):
+        def only_pynini(name):
+            return object() if name == "pynini" else None
+
+        with patch.object(synthesis, "_find_spec", side_effect=only_pynini):
+            self.assertIs(self._synthesize(), False)
+
+
 if __name__ == "__main__":
     unittest.main()
