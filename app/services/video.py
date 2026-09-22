@@ -102,15 +102,51 @@ def _get_required_video_duration(audio_duration: float) -> float:
     return max(0.0, float(audio_duration) + _VIDEO_DURATION_SAFETY_MARGIN)
 
 
+def get_min_material_dimension() -> int:
+    """
+    返回素材最小边长阈值（像素），默认 `_MIN_MATERIAL_DIMENSION`。
+
+    使用场景：默认的 480 是按竖屏成片质量设定的，它会把 640x360 这类标准
+    360p 横屏素材整体挡在门外，最终表现为“没有可用素材”的任务失败。素材
+    质量要求本身因人而异，因此把阈值开放为配置项：想用低清素材的用户可以
+    调低（0 表示不做分辨率限制），对画质敏感的用户也可以调高，而不需要改
+    代码。配置值非法时回退到默认值，避免一个笔误直接放行所有素材。
+    """
+    raw_value = config.app.get("min_material_dimension", _MIN_MATERIAL_DIMENSION)
+    try:
+        min_dimension = int(raw_value)
+    except (TypeError, ValueError):
+        logger.warning(
+            f"invalid min_material_dimension: {raw_value}, "
+            f"fallback to {_MIN_MATERIAL_DIMENSION}"
+        )
+        return _MIN_MATERIAL_DIMENSION
+
+    if min_dimension < 0:
+        logger.warning(
+            f"negative min_material_dimension: {min_dimension}, "
+            f"fallback to {_MIN_MATERIAL_DIMENSION}"
+        )
+        return _MIN_MATERIAL_DIMENSION
+
+    return min_dimension
+
+
 def is_material_resolution_acceptable(width: int, height: int) -> bool:
     """
     判断素材分辨率是否足够用于合成。
 
-    标称最小值是 480x480，但允许比它低 `_MIN_DIMENSION_TOLERANCE` 个像素，
-    以兼容编码器/消息应用向下取整导致的尺寸（例如 WhatsApp 的 478x850）。
+    标称最小值由 `get_min_material_dimension()` 给出（默认 480x480），但允许
+    比它低 `_MIN_DIMENSION_TOLERANCE` 个像素，以兼容编码器/消息应用向下取整
+    导致的尺寸（例如 WhatsApp 的 478x850）。
     """
-    min_dimension = _MIN_MATERIAL_DIMENSION - _MIN_DIMENSION_TOLERANCE
-    return width >= min_dimension and height >= min_dimension
+    return _is_resolution_acceptable_for(width, height, get_min_material_dimension())
+
+
+def _is_resolution_acceptable_for(width: int, height: int, min_dimension: int) -> bool:
+    """按已解析的阈值判断分辨率，供批量预处理复用同一次配置读取。"""
+    effective_minimum = max(0, min_dimension - _MIN_DIMENSION_TOLERANCE)
+    return width >= effective_minimum and height >= effective_minimum
 
 
 def _prioritize_unique_source_clips(
@@ -581,7 +617,15 @@ def combine_videos(
 
     processed_clips = []
     subclipped_items = []
+    # 顺序拼接模式下，每个素材先只贡献第一个片段，让成片开头与素材（以及文案）
+    # 顺序一一对应。素材的其余片段不再直接丢弃，而是按时间顺序留作后备：首轮
+    # 片段不足以覆盖音频时，先播放这些还没用过的画面，再考虑循环重复。否则
+    # 一个 8 分钟的本地素材只会贡献前 3 秒，然后被重复上百次填满整条音频。
+    overflow_items_by_source = []
     video_duration = 0
+    is_sequential_concat = (
+        video_concat_mode.value == VideoConcatMode.sequential.value
+    )
     for video_path in video_paths:
         clip = _open_video_clip_quietly(video_path)
         clip_duration = clip.duration
@@ -589,6 +633,8 @@ def combine_videos(
         close_clip(clip)
         
         start_time = 0
+        is_first_segment = True
+        source_overflow_items = []
 
         while start_time < clip_duration:
             end_time = min(start_time + source_clip_duration, clip_duration)
@@ -597,27 +643,45 @@ def combine_videos(
             # 这样既不会丢掉“整段视频本身就短于 max_clip_duration”的素材，
             # 也不会吞掉长视频最后剩下的一小段尾部内容。
             if end_time > start_time:
-                subclipped_items.append(
-                    SubClippedVideoClip(
-                        file_path=video_path,
-                        start_time=start_time,
-                        end_time=end_time,
-                        width=clip_w,
-                        height=clip_h,
-                        source_file_path=video_path,
-                    )
+                segment = SubClippedVideoClip(
+                    file_path=video_path,
+                    start_time=start_time,
+                    end_time=end_time,
+                    width=clip_w,
+                    height=clip_h,
+                    source_file_path=video_path,
                 )
+                if is_sequential_concat and not is_first_segment:
+                    source_overflow_items.append(segment)
+                else:
+                    subclipped_items.append(segment)
+                is_first_segment = False
 
             start_time = end_time
-            if video_concat_mode.value == VideoConcatMode.sequential.value:
-                break
+
+        if source_overflow_items:
+            overflow_items_by_source.append(source_overflow_items)
 
     subclipped_items = _prioritize_unique_source_clips(
         subclipped_items=subclipped_items,
         concat_mode=video_concat_mode,
     )
-        
-    logger.debug(f"total subclipped items: {len(subclipped_items)}")
+
+    if overflow_items_by_source:
+        # 后备片段在素材之间轮流取用，避免同一个素材的连续画面挤在一起，
+        # 让多素材场景仍然保持“依次轮换”的观感；单素材场景则等价于按时间顺序播放。
+        subclipped_items.extend(
+            segment
+            for round_segments in itertools.zip_longest(*overflow_items_by_source)
+            for segment in round_segments
+            if segment is not None
+        )
+
+    logger.debug(
+        f"total subclipped items: {len(subclipped_items)} "
+        f"(including {sum(len(items) for items in overflow_items_by_source)} "
+        "reserve segments used only when the first pass cannot cover the audio)"
+    )
     
     # Add downloaded clips over and over until the duration of the audio (max_duration) has been reached
     for i, subclipped_item in enumerate(subclipped_items):
@@ -1267,7 +1331,18 @@ def generate_video(
         return bgm_mix_succeeded
 
 
-def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
+def preprocess_video(
+    materials: List[MaterialInfo],
+    clip_duration=4,
+    rejections: List[str] | None = None,
+):
+    """
+    校验并预处理本地素材，返回可用于合成的素材列表。
+
+    `rejections` 是可选的输出列表：每个被跳过的素材都会追加一条可读原因。
+    调用方（任务编排层）需要把这些原因回写到任务失败信息里，否则用户只能
+    看到“没有可用素材”这类无法定位问题的文案，只能反复重试同一份素材。
+    """
     # WebUI 在某些二次生成场景下可能传入空素材列表，这里直接返回空结果，避免抛出 NoneType 异常。
     if not materials:
         return []
@@ -1275,9 +1350,16 @@ def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
     # 仅返回通过预处理校验的素材，避免低分辨率图片继续进入后续的视频合成流程。
     valid_materials = []
     local_videos_dir = utils.storage_dir("local_videos", create=True)
+    min_dimension = get_min_material_dimension()
+
+    def _reject(material_url: str, reason: str) -> None:
+        if rejections is None:
+            return
+        rejections.append(f"{os.path.basename(material_url) or material_url}: {reason}")
 
     for material in materials:
         if not material.url:
+            _reject("<empty>", "material path is empty")
             continue
 
         try:
@@ -1291,6 +1373,10 @@ def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
             logger.warning(
                 f"skip unsafe local material: {material.url}, "
                 f"local_videos_dir: {local_videos_dir}, error: {str(exc)}"
+            )
+            _reject(
+                material.url,
+                f"not usable from the local materials directory ({str(exc)})",
             )
             continue
 
@@ -1313,15 +1399,25 @@ def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
                 logger.warning(
                     f"skip unreadable local material: {material.url}, error: {str(exc)}"
                 )
+                _reject(
+                    material.url,
+                    f"could not be opened as video or image ({str(exc)})",
+                )
                 continue
         try:
             width = clip.size[0]
             height = clip.size[1]
-            if not is_material_resolution_acceptable(width, height):
+            if not _is_resolution_acceptable_for(width, height, min_dimension):
                 logger.warning(
-                    f"low resolution material: {width}x{height}, minimum "
-                    f"{_MIN_MATERIAL_DIMENSION}x{_MIN_MATERIAL_DIMENSION} required "
+                    f"low resolution material: {material.url}, {width}x{height}, "
+                    f"minimum {min_dimension}x{min_dimension} required "
                     f"(tolerance {_MIN_DIMENSION_TOLERANCE}px)"
+                )
+                _reject(
+                    material.url,
+                    f"resolution {width}x{height} is below the required "
+                    f"{min_dimension}x{min_dimension} "
+                    "(lower app.min_material_dimension to allow it)",
                 )
                 # 探测到低分辨率素材后立即关闭资源，并且不要把该素材返回给后续流程。
                 close_clip(clip)

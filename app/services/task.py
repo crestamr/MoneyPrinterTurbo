@@ -577,6 +577,24 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     return subtitle_path
 
 
+_MAX_REPORTED_MATERIAL_REJECTIONS = 3
+
+
+def _describe_material_rejections(rejections: list[str]) -> str:
+    """把逐条素材拒绝原因拼成一条面向用户的失败说明。"""
+    base_message = "no valid local video materials were found"
+    if not rejections:
+        return base_message
+
+    # 素材可能有几十条，全部拼进错误里会让 API 响应和 WebUI 提示无法阅读。
+    # 只展示前几条具体原因，剩余数量用汇总提示，完整清单仍然保留在日志中。
+    reported = list(rejections[:_MAX_REPORTED_MATERIAL_REJECTIONS])
+    remaining = len(rejections) - len(reported)
+    if remaining > 0:
+        reported.append(f"and {remaining} more")
+    return f"{base_message}: " + "; ".join(reported)
+
+
 def get_video_materials(
     task_id,
     params,
@@ -586,14 +604,29 @@ def get_video_materials(
 ):
     if params.video_source == "local":
         logger.info("\n\n## preprocess local materials")
+        if not params.video_materials:
+            _mark_task_failed(
+                task_id,
+                "materials",
+                "no local video materials were provided; upload at least one "
+                "material before generating",
+            )
+            return None
+
+        # 逐条收集素材被拒绝的原因。素材全部不合格时，用户看到的必须是可执行的
+        # 具体原因（分辨率过低、文件损坏、路径不合法），否则只能反复上传同一份
+        # 素材重试，而日志里的告警对使用 WebUI 或 API 的人是不可见的。
+        rejections: list[str] = []
         materials = video.preprocess_video(
-            materials=params.video_materials, clip_duration=params.video_clip_duration
+            materials=params.video_materials,
+            clip_duration=params.video_clip_duration,
+            rejections=rejections,
         )
         if not materials:
             _mark_task_failed(
                 task_id,
                 "materials",
-                "no valid local video materials were found",
+                _describe_material_rejections(rejections),
             )
             return None
         return [material_info.url for material_info in materials]

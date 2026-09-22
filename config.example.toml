@@ -55,6 +55,15 @@ tls_verify = true
 # confirmation in the WebUI before each generation request.
 video_source = "pexels"
 
+# Minimum width and height (in pixels) a material must have to be used.
+# Materials smaller than this are skipped, and a task fails when none are left.
+# The default rejects standard 360p footage (640x360); lower it to 360 to allow
+# such clips, or set 0 to disable the check entirely.
+# 素材可用的最小边长（像素）。低于该值的素材会被跳过，全部被跳过时任务失败。
+# 默认值会挡掉 640x360 这类标准 360p 素材；需要使用它们可改为 360，
+# 设置为 0 表示完全不做分辨率限制。
+min_material_dimension = 480
+
 # API key lists support key rotation. Use straight ASCII double quotes and
 # separate multiple keys with commas, for example: ["key-1", "key-2"].
 # Key 必须使用英文半角双引号，多个 Key 使用英文逗号分隔。

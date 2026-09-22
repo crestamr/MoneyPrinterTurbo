@@ -24,6 +24,57 @@ RUN_INTEGRATION_TESTS = os.environ.get("MPT_RUN_INTEGRATION_TESTS", "").lower() 
 }
 
 
+class TestLocalMaterialFailureReporting(unittest.TestCase):
+    """本地素材全部不合格时，失败信息必须让用户知道该改什么。"""
+
+    def test_missing_materials_reports_that_nothing_was_uploaded(self):
+        params = VideoParams(video_subject="test", video_source="local")
+        params.video_materials = []
+
+        with patch.object(tm, "_mark_task_failed") as mark_failed:
+            result = tm.get_video_materials(
+                task_id=str(uuid4()),
+                params=params,
+                video_terms=[],
+                audio_duration=10,
+            )
+
+        self.assertIsNone(result)
+        message = mark_failed.call_args.args[2]
+        self.assertIn("no local video materials were provided", message)
+
+    def test_rejected_materials_report_each_reason(self):
+        params = VideoParams(video_subject="test", video_source="local")
+        params.video_materials = [MaterialInfo(provider="local", url="clip.mp4")]
+
+        def fake_preprocess(materials, clip_duration, rejections):
+            rejections.append("clip.mp4: resolution 640x360 is below the required 480x480")
+            return []
+
+        with patch.object(tm.video, "preprocess_video", side_effect=fake_preprocess):
+            with patch.object(tm, "_mark_task_failed") as mark_failed:
+                result = tm.get_video_materials(
+                    task_id=str(uuid4()),
+                    params=params,
+                    video_terms=[],
+                    audio_duration=10,
+                )
+
+        self.assertIsNone(result)
+        message = mark_failed.call_args.args[2]
+        self.assertIn("no valid local video materials were found", message)
+        self.assertIn("640x360", message)
+
+    def test_reason_list_is_truncated_for_readability(self):
+        rejections = [f"clip-{index}.mp4: unreadable" for index in range(6)]
+
+        message = tm._describe_material_rejections(rejections)
+
+        self.assertIn("clip-0.mp4", message)
+        self.assertNotIn("clip-5.mp4", message)
+        self.assertIn("and 3 more", message)
+
+
 class TestTaskService(unittest.TestCase):
     def setUp(self):
         # 发布 Future 注册表是进程级状态。测试间清理可以避免某个模拟 Future

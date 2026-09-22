@@ -9,6 +9,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 from moviepy import (
     ImageClip,
     VideoFileClip,
@@ -359,6 +360,50 @@ class TestVideoService(unittest.TestCase):
         materials = vd.preprocess_video([m], clip_duration=4)
 
         self.assertEqual(materials, [])
+
+    def test_preprocess_video_reports_rejection_reasons(self):
+        """
+        素材被全部跳过时，编排层必须拿到具体原因才能告诉用户该改什么，
+        否则用户只会看到“没有可用素材”，反复上传同一份不合格素材重试。
+        """
+        outside = MaterialInfo(provider="local", url=self.test_img_path)
+        empty = MaterialInfo(provider="local", url="")
+
+        rejections: list[str] = []
+        materials = vd.preprocess_video(
+            [outside, empty], clip_duration=4, rejections=rejections
+        )
+
+        self.assertEqual(materials, [])
+        self.assertEqual(len(rejections), 2)
+        self.assertIn(
+            "not usable from the local materials directory", rejections[0]
+        )
+        self.assertIn("material path is empty", rejections[1])
+
+    def test_preprocess_video_reports_low_resolution_reason(self):
+        """低分辨率是最常见的失败原因，必须带上实际尺寸和可调整的配置项。"""
+        local_videos_dir = utils.storage_dir("local_videos", create=True)
+        small_img_path = os.path.join(local_videos_dir, "test-low-resolution.png")
+        ImageClip(
+            np.zeros((120, 160, 3), dtype=np.uint8), duration=1
+        ).save_frame(small_img_path, t=0)
+
+        try:
+            m = MaterialInfo(provider="local", url=os.path.basename(small_img_path))
+            rejections: list[str] = []
+
+            materials = vd.preprocess_video(
+                [m], clip_duration=4, rejections=rejections
+            )
+
+            self.assertEqual(materials, [])
+            self.assertEqual(len(rejections), 1)
+            self.assertIn("160x120", rejections[0])
+            self.assertIn("min_material_dimension", rejections[0])
+        finally:
+            if os.path.exists(small_img_path):
+                os.remove(small_img_path)
 
     def test_get_bgm_file_accepts_song_directory_filename(self):
         """
@@ -803,6 +848,147 @@ class TestVideoService(unittest.TestCase):
         self.assertEqual(source_ranges, [(0, 6.0)])
         self.assertEqual(written_durations, [3.0])
 
+    def _capture_sequential_source_reads(
+        self,
+        source_durations,
+        audio_duration,
+        max_clip_duration=3,
+    ):
+        """
+        在顺序拼接模式下记录 combine_videos 实际读取了哪些源片段。
+
+        返回 (reads, looped) —— reads 是 (源文件, 起点, 终点) 列表，
+        looped 表示是否触发了“素材不足、循环重复”的兜底分支。
+        """
+        reads = []
+        looped = False
+
+        class _FakeAudioClip:
+            duration = audio_duration
+
+            def close(self):
+                pass
+
+        class _FakeVideoClip:
+            def __init__(self, duration, video_path=None):
+                self.duration = duration
+                self.video_path = video_path
+                self.size = (1080, 1920)
+                self.w = 1080
+                self.h = 1920
+
+            def subclipped(self, start_time, end_time):
+                if self.video_path is not None:
+                    reads.append((self.video_path, start_time, end_time))
+                return _FakeVideoClip(end_time - start_time)
+
+            def with_speed_scaled(self, factor):
+                return _FakeVideoClip(self.duration / factor)
+
+            def close(self):
+                pass
+
+        def _open_fake_video_clip(video_path):
+            return _FakeVideoClip(source_durations[video_path], video_path=video_path)
+
+        original_warning = vd.logger.warning
+
+        def _record_loop_warning(message, *args, **kwargs):
+            nonlocal looped
+            if "looping clips" in str(message):
+                looped = True
+            return original_warning(message, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            combined_video_path = os.path.join(temp_dir, "combined.mp4")
+            with (
+                patch.object(vd, "AudioFileClip", return_value=_FakeAudioClip()),
+                patch.object(
+                    vd, "_open_video_clip_quietly", side_effect=_open_fake_video_clip
+                ),
+                patch.object(vd, "_write_videofile_with_codec_fallback"),
+                patch.object(vd, "concat_video_clips_with_ffmpeg"),
+                patch.object(vd, "delete_files"),
+                patch.object(vd.logger, "warning", side_effect=_record_loop_warning),
+            ):
+                vd.combine_videos(
+                    combined_video_path=combined_video_path,
+                    video_paths=list(source_durations),
+                    audio_file="audio.mp3",
+                    video_concat_mode=vd.VideoConcatMode.sequential,
+                    max_clip_duration=max_clip_duration,
+                )
+
+        return reads, looped
+
+    def test_sequential_mode_uses_rest_of_a_long_material_before_looping(self):
+        """
+        顺序模式下，单个长素材必须继续按时间顺序播放后续画面。
+
+        旧实现每个素材只取第一个片段，一个 8 分钟素材只贡献前 3 秒，
+        随后靠循环把这 3 秒重复上百次填满旁白，成片完全没有画面变化。
+        """
+        reads, looped = self._capture_sequential_source_reads(
+            source_durations={"long.mp4": 60.0},
+            audio_duration=11.9,
+        )
+
+        self.assertEqual(
+            reads,
+            [
+                ("long.mp4", 0, 3),
+                ("long.mp4", 3, 6),
+                ("long.mp4", 6, 9),
+                ("long.mp4", 9, 12),
+            ],
+        )
+        self.assertFalse(looped)
+
+    def test_sequential_mode_still_takes_one_clip_per_material_first(self):
+        """
+        素材足够时必须保持“每个素材各出一个片段、按素材顺序排列”的原行为，
+        这是文案顺序匹配（下载素材场景）依赖的语义，不能被后备片段打乱。
+        """
+        reads, _ = self._capture_sequential_source_reads(
+            source_durations={"a.mp4": 30.0, "b.mp4": 30.0, "c.mp4": 30.0},
+            audio_duration=8.9,
+        )
+
+        self.assertEqual(
+            reads,
+            [("a.mp4", 0, 3), ("b.mp4", 0, 3), ("c.mp4", 0, 3)],
+        )
+
+    def test_sequential_mode_rotates_through_materials_for_reserve_clips(self):
+        """首轮片段用尽后，后备片段应在素材之间轮流取用，而不是堆在同一素材上。"""
+        reads, looped = self._capture_sequential_source_reads(
+            source_durations={"a.mp4": 30.0, "b.mp4": 30.0},
+            audio_duration=17.9,
+        )
+
+        self.assertEqual(
+            reads,
+            [
+                ("a.mp4", 0, 3),
+                ("b.mp4", 0, 3),
+                ("a.mp4", 3, 6),
+                ("b.mp4", 3, 6),
+                ("a.mp4", 6, 9),
+                ("b.mp4", 6, 9),
+            ],
+        )
+        self.assertFalse(looped)
+
+    def test_sequential_mode_still_loops_when_material_is_genuinely_short(self):
+        """素材总量真的不够时，循环兜底必须保留，否则成片会短于旁白。"""
+        reads, looped = self._capture_sequential_source_reads(
+            source_durations={"short.mp4": 3.0},
+            audio_duration=8.9,
+        )
+
+        self.assertEqual(reads, [("short.mp4", 0, 3)])
+        self.assertTrue(looped)
+
     def test_combine_videos_keeps_small_duration_safety_margin(self):
         """
         音频和素材累计时长刚好相等时，仍应继续追加一个短片段作为安全余量。
@@ -1024,6 +1210,22 @@ class TestVideoService(unittest.TestCase):
 
 
 class TestMaterialResolutionTolerance(unittest.TestCase):
+    """
+    这些用例断言的是默认阈值下的行为，因此必须固定阈值。
+    否则开发机 config.toml 里的 min_material_dimension 会让结果随环境变化。
+    """
+
+    def setUp(self):
+        self._had_key = "min_material_dimension" in config.app
+        self._original = config.app.get("min_material_dimension")
+        config.app["min_material_dimension"] = vd._MIN_MATERIAL_DIMENSION
+
+    def tearDown(self):
+        if self._had_key:
+            config.app["min_material_dimension"] = self._original
+        else:
+            config.app.pop("min_material_dimension", None)
+
     def test_accepts_material_at_the_nominal_minimum(self):
         self.assertTrue(vd.is_material_resolution_acceptable(480, 480))
 
@@ -1043,6 +1245,43 @@ class TestMaterialResolutionTolerance(unittest.TestCase):
 
     def test_rejects_genuinely_low_resolution_material(self):
         self.assertFalse(vd.is_material_resolution_acceptable(320, 240))
+
+
+class TestConfigurableMinMaterialDimension(unittest.TestCase):
+    """最小边长阈值必须可配置，否则 360p 素材只能靠改代码才能使用。"""
+
+    def setUp(self):
+        self._had_key = "min_material_dimension" in config.app
+        self._original = config.app.get("min_material_dimension")
+
+    def tearDown(self):
+        if self._had_key:
+            config.app["min_material_dimension"] = self._original
+        else:
+            config.app.pop("min_material_dimension", None)
+
+    def test_defaults_to_the_nominal_minimum_when_unset(self):
+        config.app.pop("min_material_dimension", None)
+        self.assertEqual(vd.get_min_material_dimension(), vd._MIN_MATERIAL_DIMENSION)
+
+    def test_lowered_threshold_accepts_standard_360p_material(self):
+        config.app.pop("min_material_dimension", None)
+        self.assertFalse(vd.is_material_resolution_acceptable(640, 360))
+
+        config.app["min_material_dimension"] = 360
+        self.assertTrue(vd.is_material_resolution_acceptable(640, 360))
+
+    def test_zero_threshold_disables_the_resolution_gate(self):
+        config.app["min_material_dimension"] = 0
+        self.assertTrue(vd.is_material_resolution_acceptable(64, 36))
+
+    def test_invalid_threshold_falls_back_to_the_default(self):
+        for invalid_value in ("not-a-number", None, -1):
+            with self.subTest(value=invalid_value):
+                config.app["min_material_dimension"] = invalid_value
+                self.assertEqual(
+                    vd.get_min_material_dimension(), vd._MIN_MATERIAL_DIMENSION
+                )
 
 
 if __name__ == "__main__":
