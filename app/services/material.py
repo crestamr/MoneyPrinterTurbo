@@ -828,6 +828,7 @@ def download_videos(
             audio_duration=audio_duration,
             max_clip_duration=max_clip_duration,
             material_directory=material_directory,
+            provider=provider,
         )
 
     valid_video_items = []
@@ -846,6 +847,23 @@ def download_videos(
                 valid_video_items.append(item)
                 valid_video_urls.append(item.url)
                 found_duration += item.duration
+
+        if provider == "minimax" and found_duration >= audio_duration:
+            # MiniMax 的“搜索”其实是一次付费 AI 视频生成，每个关键词只返回
+            # 一个候选，不是免费检索。累计时长一旦够用就必须立刻停止，
+            # 否则会为后续用不到的关键词继续付费生成，违背“按需生成、不
+            # 浪费”的设计目标。这里不额外加“多搜一轮”的安全余量：如果某个
+            # 关键词命中内容审核被拒绝而返回空列表，found_duration 不会
+            # 增加，循环会自然继续尝试下一个关键词，不会出现素材不够却提前
+            # 停止的情况。Pexels/Pixabay/Coverr 的搜索是免费的，继续收集
+            # 全部关键词的候选能为最终成片提供更好的素材多样性，因此不受此
+            # 提前退出影响。
+            logger.info(
+                f"minimax: found duration {found_duration} seconds already "
+                f"covers required {audio_duration} seconds, stop generating "
+                "more clips"
+            )
+            break
 
     logger.info(
         f"found total videos: {len(valid_video_items)}, required duration: {audio_duration} seconds, found duration: {found_duration} seconds"
@@ -909,6 +927,7 @@ def _download_videos_by_script_order(
     audio_duration: float,
     max_clip_duration: int,
     material_directory: str,
+    provider: str = "pexels",
 ) -> List[str]:
     """
     按脚本文案顺序下载素材。
@@ -942,6 +961,19 @@ def _download_videos_by_script_order(
 
         if term_items:
             candidate_groups.append((search_term, term_items))
+
+        if provider == "minimax" and found_duration >= audio_duration:
+            # 与 download_videos() 中的提前退出逻辑一致：MiniMax 的“搜索”是
+            # 一次付费 AI 生成，达到目标时长后立即停止，避免为用不到的关键
+            # 词继续付费生成。内容审核拒绝导致某关键词返回空列表时，
+            # found_duration 不会增加，循环会自然继续尝试下一个关键词，
+            # 因此不需要额外的安全余量。
+            logger.info(
+                f"minimax: found duration {found_duration} seconds already "
+                f"covers required {audio_duration} seconds, stop generating "
+                "more clips"
+            )
+            break
 
     logger.info(
         f"found total ordered video candidates: {sum(len(items) for _, items in candidate_groups)}, "

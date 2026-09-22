@@ -1122,6 +1122,140 @@ class TestMinimaxLocalFileHandling(unittest.TestCase):
         self.assertEqual(generate_mock.call_args.kwargs["search_term"], "cats")
         self.assertEqual(paths, ["/tmp/fake-saved-video.mp4"])
 
+    def test_download_videos_stops_generating_minimax_clips_once_duration_covered(
+        self,
+    ):
+        """
+        MiniMax 的每次“搜索”都是一次付费 AI 视频生成，不是免费检索。这里有
+        5 个关键词，但 max_clip_duration=5、audio_duration=8，只需要 2 个
+        候选（2*5=10 >= 8）就能覆盖目标时长，不应该为剩下 3 个关键词继续
+        付费生成。
+        """
+        call_terms = []
+
+        def fake_generate(search_term, minimum_duration, video_aspect, **kwargs):
+            call_terms.append(search_term)
+            item = material.MaterialInfo()
+            item.provider = "minimax"
+            item.url = f"https://cdn.example.com/{search_term}.mp4"
+            item.duration = 5
+            item.source_info = {"provider": "minimax", "search_term": search_term}
+            return [item]
+
+        with patch(
+            "app.services.material.minimax_video.generate_videos_minimax",
+            side_effect=fake_generate,
+        ) as generate_mock, patch(
+            "app.services.material.save_video",
+            return_value="/tmp/fake-saved-video.mp4",
+        ), patch(
+            "app.services.material.material_cache.load_material_search_cache",
+            return_value=None,
+        ), patch(
+            "app.services.material.material_cache.save_material_search_cache",
+        ):
+            paths = material.download_videos(
+                task_id="test-task-early-exit",
+                search_terms=["a", "b", "c", "d", "e"],
+                source="minimax",
+                audio_duration=8,
+                max_clip_duration=5,
+            )
+
+        self.assertEqual(generate_mock.call_count, 2)
+        self.assertEqual(call_terms, ["a", "b"])
+        self.assertEqual(len(paths), 2)
+        self.assertLess(generate_mock.call_count, 5)
+
+    def test_download_videos_script_order_stops_generating_minimax_clips_once_duration_covered(
+        self,
+    ):
+        """
+        与上一个测试相同的场景，但走 match_script_order=True 的分组轮询
+        下载路径（_download_videos_by_script_order）——该路径有独立的搜索
+        循环，必须同样在达到目标时长后立刻停止为 MiniMax 生成新素材。
+        """
+        call_terms = []
+
+        def fake_generate(search_term, minimum_duration, video_aspect, **kwargs):
+            call_terms.append(search_term)
+            item = material.MaterialInfo()
+            item.provider = "minimax"
+            item.url = f"https://cdn.example.com/{search_term}.mp4"
+            item.duration = 5
+            item.source_info = {"provider": "minimax", "search_term": search_term}
+            return [item]
+
+        with patch(
+            "app.services.material.minimax_video.generate_videos_minimax",
+            side_effect=fake_generate,
+        ) as generate_mock, patch(
+            "app.services.material.save_video",
+            return_value="/tmp/fake-saved-video.mp4",
+        ), patch(
+            "app.services.material.material_cache.load_material_search_cache",
+            return_value=None,
+        ), patch(
+            "app.services.material.material_cache.save_material_search_cache",
+        ):
+            paths = material.download_videos(
+                task_id="test-task-script-order-early-exit",
+                search_terms=["a", "b", "c", "d", "e"],
+                source="minimax",
+                audio_duration=8,
+                max_clip_duration=5,
+                match_script_order=True,
+            )
+
+        self.assertEqual(generate_mock.call_count, 2)
+        self.assertEqual(call_terms, ["a", "b"])
+        self.assertEqual(len(paths), 2)
+
+    def test_download_videos_pexels_still_searches_all_terms_when_duration_covered_early(
+        self,
+    ):
+        """
+        Pexels 等免费素材源不受 MiniMax 提前退出逻辑影响：即使前几个关键词
+        已经累计够用的时长，也要继续搜索全部关键词，为随机洗牌保留更多
+        候选，提升最终成片的素材多样性。使用与上面 MiniMax 测试相同的
+        audio_duration/max_clip_duration 数值，验证两者行为确实不同。
+        """
+        call_terms = []
+
+        def fake_search(search_term, minimum_duration, video_aspect, **kwargs):
+            call_terms.append(search_term)
+            item = material.MaterialInfo()
+            item.provider = "pexels"
+            item.url = f"https://v.example/{search_term}.mp4"
+            item.duration = 5
+            item.source_info = {"provider": "pexels", "search_term": search_term}
+            return [item]
+
+        with patch.object(
+            material, "search_videos_pexels", side_effect=fake_search
+        ) as search_mock, patch.object(
+            material, "save_video", return_value="/tmp/fake-saved-video.mp4"
+        ), patch.object(
+            material.material_cache,
+            "load_material_search_cache",
+            return_value=None,
+        ), patch.object(material.material_cache, "save_material_search_cache"):
+            paths = material.download_videos(
+                task_id="test-task-pexels-full-search",
+                search_terms=["a", "b", "c", "d", "e"],
+                source="pexels",
+                audio_duration=8,
+                max_clip_duration=5,
+            )
+
+        # 搜索阶段必须仍然遍历全部关键词——这是本测试要验证的行为不变点。
+        # 下载阶段本身另有一条与本次修复无关、修复前就存在的提前停止逻辑
+        # (一旦累计已下载时长超过 audio_duration 就停止继续下载)，因此
+        # 实际下载数量小于候选总数是预期行为，这里不对 paths 数量做断言。
+        self.assertEqual(search_mock.call_count, 5)
+        self.assertEqual(call_terms, ["a", "b", "c", "d", "e"])
+        self.assertGreater(len(paths), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
