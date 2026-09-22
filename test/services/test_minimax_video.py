@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from app.config import config
+from app.models.schema import VideoAspect
 from app.services import minimax_video
 
 
@@ -63,6 +64,44 @@ class TestMiniMaxVideoSettings(unittest.TestCase):
         self.assertEqual(
             minimax_video.get_minimax_video_base_url(),
             "https://api.minimaxi.com",
+        )
+
+
+class TestMiniMaxVideoMapping(unittest.TestCase):
+    def test_build_prompt_excludes_text_and_captions(self):
+        prompt = minimax_video._build_prompt("golden retriever running on beach")
+
+        self.assertIn("golden retriever running on beach", prompt)
+        self.assertIn("no text", prompt.lower())
+        self.assertIn("no captions", prompt.lower())
+
+    def test_aspect_ratio_matches_minimax_enum_values(self):
+        self.assertEqual(
+            minimax_video._aspect_to_ratio(VideoAspect.portrait), "9:16"
+        )
+        self.assertEqual(
+            minimax_video._aspect_to_ratio(VideoAspect.landscape), "16:9"
+        )
+        self.assertEqual(minimax_video._aspect_to_ratio(VideoAspect.square), "1:1")
+
+    def test_clamp_duration_within_model_range(self):
+        self.assertEqual(
+            minimax_video._clamp_duration(5, model="MiniMax-H3"), 5
+        )
+
+    def test_clamp_duration_below_minimum_is_raised_to_minimum(self):
+        self.assertEqual(
+            minimax_video._clamp_duration(2, model="MiniMax-H3"), 4
+        )
+
+    def test_clamp_duration_above_maximum_is_lowered_to_maximum(self):
+        self.assertEqual(
+            minimax_video._clamp_duration(30, model="MiniMax-H3"), 15
+        )
+
+    def test_clamp_duration_uses_h3_max_range(self):
+        self.assertEqual(
+            minimax_video._clamp_duration(2, model="MiniMax-H3-Max"), 5
         )
 
 

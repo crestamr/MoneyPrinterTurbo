@@ -91,3 +91,19 @@ def get_minimax_video_base_url() -> str:
         if inferred_url:
             return inferred_url
     return _resolve_minimax_video_base_url(config.minimax_video.get("base_url", ""))
+
+
+def _build_prompt(search_term: str) -> str:
+    return (
+        f"Cinematic stock-footage-style video clip: {search_term}. "
+        "No text, no captions, no subtitles, no watermarks, no logos."
+    )
+
+
+def _aspect_to_ratio(video_aspect) -> str:
+    return str(video_aspect.value)
+
+
+def _clamp_duration(minimum_duration: int, *, model: str) -> int:
+    low, high = MODEL_DURATION_RANGES.get(model, MODEL_DURATION_RANGES[DEFAULT_MODEL])
+    return max(low, min(high, int(minimum_duration)))
