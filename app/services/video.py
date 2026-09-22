@@ -1330,6 +1330,7 @@ def generate_video(
         )
         return bgm_mix_succeeded
 
+
 def render_image_as_zoom_clip(image_path: str, duration: float) -> str:
     """Render a still image as an .mp4 with a subtle Ken Burns zoom effect.
 
@@ -1338,16 +1339,17 @@ def render_image_as_zoom_clip(image_path: str, duration: float) -> str:
     (image_path with ".mp4" appended).
     """
     clip = ImageClip(image_path).with_duration(duration).with_position("center")
-    zoom_clip = clip.resized(lambda t: 1 + (duration * 0.03) * (t / clip.duration))
-    final_clip = CompositeVideoClip([zoom_clip])
-
-    video_file = f"{image_path}.mp4"
-    final_clip.write_videofile(video_file, fps=30, logger=None)
-    close_clip(clip)
-    close_clip(final_clip)
-    return video_file
-
-
+    final_clip = None
+    try:
+        zoom_clip = clip.resized(lambda t: 1 + (duration * 0.03) * (t / clip.duration))
+        final_clip = CompositeVideoClip([zoom_clip])
+        video_file = f"{image_path}.mp4"
+        final_clip.write_videofile(video_file, fps=30, logger=None)
+        return video_file
+    finally:
+        close_clip(clip)
+        if final_clip is not None:
+            close_clip(final_clip)
 
 
 def preprocess_video(
