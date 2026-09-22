@@ -288,6 +288,177 @@ class TestMiniMaxPollTask(unittest.TestCase):
                     poll_timeout_seconds=10.0,
                 )
 
+    def test_poll_task_raises_immediately_when_task_status_is_missing(self):
+        # Regression test: a response missing "status" entirely must fail
+        # fast rather than being treated as "still pending" and polled
+        # until poll_timeout_seconds elapses. requests.get is only stubbed
+        # to return once (return_value, not an iterator/side_effect list),
+        # and time.sleep is patched to explode if called -- so if the
+        # missing-status check regresses back to silently polling, this
+        # test fails loudly instead of hanging for the full timeout.
+        fake_response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"task": {}},
+        )
+        with patch(
+            "app.services.minimax_video.requests.get", return_value=fake_response
+        ), patch(
+            "app.services.minimax_video.time.sleep",
+            side_effect=AssertionError(
+                "polling should not continue when task status is missing"
+            ),
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError) as ctx:
+                minimax_video._poll_task(
+                    task_id="task-abc123",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                    poll_interval_seconds=1.0,
+                    poll_timeout_seconds=300.0,
+                )
+        self.assertIn("missing task status", str(ctx.exception))
+
+    def test_poll_task_raises_when_task_status_is_empty_string(self):
+        fake_response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"task": {"status": ""}},
+        )
+        with patch(
+            "app.services.minimax_video.requests.get", return_value=fake_response
+        ), patch(
+            "app.services.minimax_video.time.sleep",
+            side_effect=AssertionError(
+                "polling should not continue when task status is empty"
+            ),
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError) as ctx:
+                minimax_video._poll_task(
+                    task_id="task-abc123",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                    poll_interval_seconds=1.0,
+                    poll_timeout_seconds=300.0,
+                )
+        self.assertIn("missing task status", str(ctx.exception))
+
+    def test_poll_task_raises_on_non_200_status(self):
+        fake_response = SimpleNamespace(
+            status_code=500,
+            json=lambda: {"error": "internal error"},
+            text="internal error",
+        )
+        with patch(
+            "app.services.minimax_video.requests.get", return_value=fake_response
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError) as ctx:
+                minimax_video._poll_task(
+                    task_id="task-abc123",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                    poll_interval_seconds=1.0,
+                    poll_timeout_seconds=10.0,
+                )
+        self.assertEqual(ctx.exception.status_code, 500)
+
+    def test_poll_task_raises_when_succeeded_but_content_url_is_missing(self):
+        fake_response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"task": {"status": "succeeded", "content": {}}},
+        )
+        with patch(
+            "app.services.minimax_video.requests.get", return_value=fake_response
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError) as ctx:
+                minimax_video._poll_task(
+                    task_id="task-abc123",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                    poll_interval_seconds=1.0,
+                    poll_timeout_seconds=10.0,
+                )
+        self.assertIn("no content url", str(ctx.exception))
+
+    def test_poll_task_raises_when_succeeded_but_content_is_missing(self):
+        fake_response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"task": {"status": "succeeded"}},
+        )
+        with patch(
+            "app.services.minimax_video.requests.get", return_value=fake_response
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError):
+                minimax_video._poll_task(
+                    task_id="task-abc123",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                    poll_interval_seconds=1.0,
+                    poll_timeout_seconds=10.0,
+                )
+
+    def test_poll_task_raises_on_request_exception(self):
+        import requests as requests_module
+
+        with patch(
+            "app.services.minimax_video.requests.get",
+            side_effect=requests_module.ConnectionError("boom"),
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError):
+                minimax_video._poll_task(
+                    task_id="task-abc123",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                    poll_interval_seconds=1.0,
+                    poll_timeout_seconds=10.0,
+                )
+
+    def test_poll_task_raises_when_response_body_is_not_a_dict(self):
+        fake_response = SimpleNamespace(
+            status_code=200,
+            json=lambda: ["unexpected", "list"],
+        )
+        with patch(
+            "app.services.minimax_video.requests.get", return_value=fake_response
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError):
+                minimax_video._poll_task(
+                    task_id="task-abc123",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                    poll_interval_seconds=1.0,
+                    poll_timeout_seconds=10.0,
+                )
+
+    def test_poll_task_raises_when_task_key_is_missing(self):
+        fake_response = SimpleNamespace(status_code=200, json=lambda: {})
+        with patch(
+            "app.services.minimax_video.requests.get", return_value=fake_response
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError):
+                minimax_video._poll_task(
+                    task_id="task-abc123",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                    poll_interval_seconds=1.0,
+                    poll_timeout_seconds=10.0,
+                )
+
+    def test_poll_task_raises_on_invalid_json(self):
+        def _raise_value_error():
+            raise ValueError("not json")
+
+        fake_response = SimpleNamespace(status_code=200, json=_raise_value_error)
+        with patch(
+            "app.services.minimax_video.requests.get", return_value=fake_response
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError):
+                minimax_video._poll_task(
+                    task_id="task-abc123",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                    poll_interval_seconds=1.0,
+                    poll_timeout_seconds=10.0,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

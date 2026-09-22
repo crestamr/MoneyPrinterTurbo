@@ -272,7 +272,15 @@ def _poll_task(
             logger.error("MiniMax video query response is missing task")
             raise MiniMaxVideoAPIError("MiniMax video query response is missing task")
 
-        status = str(task.get("status", "")).strip().lower()
+        raw_status = task.get("status")
+        if not raw_status:
+            logger.error(
+                f"MiniMax video query response is missing task status: task_id={task_id}"
+            )
+            raise MiniMaxVideoAPIError(
+                "MiniMax video query response is missing task status"
+            )
+        status = str(raw_status).strip().lower()
         if status == "succeeded":
             content = task.get("content")
             content_url = (
