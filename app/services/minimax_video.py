@@ -8,6 +8,7 @@ its provider dispatch without a circular import.
 from __future__ import annotations
 
 import os
+import tempfile
 import time
 from urllib.parse import urlparse
 
@@ -120,6 +121,78 @@ def _clamp_duration(minimum_duration: int, *, model: str) -> int:
     return max(low, min(high, int(minimum_duration)))
 
 
+def _raise_for_status(
+    response: requests.Response, *, action: str, log_context: str = ""
+) -> None:
+    """Raise MiniMaxVideoAPIError for a non-200 response.
+
+    Shared by _create_task, _poll_task, and _download_to_cache, which all
+    need the same truncate-body -> log -> raise sequence and previously
+    duplicated it verbatim. ``action`` names the operation in messages
+    ("create", "query", "download"); ``log_context`` optionally prefixes the
+    log line with extra identifying context (e.g. ``task_id=...``).
+    """
+    if response.status_code == 200:
+        return
+    detail = ""
+    try:
+        detail = str(response.text or "")[:MAX_ERROR_BODY_CHARS]
+    except Exception:
+        detail = ""
+    message = f"MiniMax video {action} returned HTTP {response.status_code}"
+    if detail:
+        message = f"{message}: {detail}"
+    context_prefix = f"{log_context}, " if log_context else ""
+    logger.error(
+        f"MiniMax video {action} failed: "
+        f"{context_prefix}status={response.status_code}, detail={detail or 'unavailable'}"
+    )
+    raise MiniMaxVideoAPIError(message, status_code=response.status_code)
+
+
+def _parse_json_object(response: requests.Response, *, action: str) -> dict:
+    """Parse a response body as a JSON object, raising MiniMaxVideoAPIError otherwise.
+
+    Shared by _create_task and _poll_task, which both need the same
+    parse-then-type-check sequence. ``action`` names the operation in
+    messages ("create", "query").
+    """
+    try:
+        body = response.json()
+    except ValueError as exc:
+        logger.error(f"MiniMax video {action} returned invalid JSON")
+        raise MiniMaxVideoAPIError(
+            f"MiniMax video {action} returned invalid JSON"
+        ) from exc
+
+    if not isinstance(body, dict):
+        logger.error(
+            f"MiniMax video {action} response is not a JSON object: "
+            f"type={type(body).__name__}"
+        )
+        raise MiniMaxVideoAPIError(
+            f"MiniMax video {action} response is not a JSON object"
+        )
+    return body
+
+
+def _remove_temp_file(file_path: str) -> None:
+    """Best-effort cleanup of a partial MiniMax download temp file.
+
+    Never overrides the caller's original exception, matching the analogous
+    _remove_file helper in elevenlabs_music.py.
+    """
+    if not file_path or not os.path.exists(file_path):
+        return
+    try:
+        os.remove(file_path)
+    except OSError as exc:
+        logger.warning(
+            f"failed to remove MiniMax temporary download file: "
+            f"path={file_path}, error={exc}"
+        )
+
+
 def _create_task(
     *,
     prompt: str,
@@ -162,37 +235,8 @@ def _create_task(
             f"MiniMax video create request failed: {type(exc).__name__}"
         ) from exc
 
-    if response.status_code != 200:
-        detail = ""
-        try:
-            detail = str(response.text or "")[:MAX_ERROR_BODY_CHARS]
-        except Exception:
-            detail = ""
-        message = f"MiniMax video create returned HTTP {response.status_code}"
-        if detail:
-            message = f"{message}: {detail}"
-        logger.error(
-            "MiniMax video create failed: "
-            f"status={response.status_code}, detail={detail or 'unavailable'}"
-        )
-        raise MiniMaxVideoAPIError(message, status_code=response.status_code)
-
-    try:
-        body = response.json()
-    except ValueError as exc:
-        logger.error("MiniMax video create returned invalid JSON")
-        raise MiniMaxVideoAPIError(
-            "MiniMax video create returned invalid JSON"
-        ) from exc
-
-    if not isinstance(body, dict):
-        logger.error(
-            "MiniMax video create response is not a JSON object: "
-            f"type={type(body).__name__}"
-        )
-        raise MiniMaxVideoAPIError(
-            "MiniMax video create response is not a JSON object"
-        )
+    _raise_for_status(response, action="create")
+    body = _parse_json_object(response, action="create")
 
     raw_task_id = body.get("task_id")
     task_id = str(raw_task_id).strip() if raw_task_id else ""
@@ -237,37 +281,8 @@ def _poll_task(
                 f"MiniMax video query request failed: {type(exc).__name__}"
             ) from exc
 
-        if response.status_code != 200:
-            detail = ""
-            try:
-                detail = str(response.text or "")[:MAX_ERROR_BODY_CHARS]
-            except Exception:
-                detail = ""
-            message = f"MiniMax video query returned HTTP {response.status_code}"
-            if detail:
-                message = f"{message}: {detail}"
-            logger.error(
-                "MiniMax video query failed: "
-                f"status={response.status_code}, detail={detail or 'unavailable'}"
-            )
-            raise MiniMaxVideoAPIError(message, status_code=response.status_code)
-
-        try:
-            body = response.json()
-        except ValueError as exc:
-            logger.error("MiniMax video query returned invalid JSON")
-            raise MiniMaxVideoAPIError(
-                "MiniMax video query returned invalid JSON"
-            ) from exc
-
-        if not isinstance(body, dict):
-            logger.error(
-                "MiniMax video query response is not a JSON object: "
-                f"type={type(body).__name__}"
-            )
-            raise MiniMaxVideoAPIError(
-                "MiniMax video query response is not a JSON object"
-            )
+        _raise_for_status(response, action="query")
+        body = _parse_json_object(response, action="query")
 
         task = body.get("task")
         if not isinstance(task, dict):
@@ -350,24 +365,29 @@ def _download_to_cache(content_url: str, task_id: str) -> str:
             f"MiniMax video download failed: {type(exc).__name__}"
         ) from exc
 
-    if response.status_code != 200:
-        detail = ""
-        try:
-            detail = str(response.text or "")[:MAX_ERROR_BODY_CHARS]
-        except Exception:
-            detail = ""
-        message = f"MiniMax video download returned HTTP {response.status_code}"
-        if detail:
-            message = f"{message}: {detail}"
-        logger.error(
-            "MiniMax video download failed: "
-            f"task_id={task_id}, status={response.status_code}, "
-            f"detail={detail or 'unavailable'}"
-        )
-        raise MiniMaxVideoAPIError(message, status_code=response.status_code)
+    _raise_for_status(response, action="download", log_context=f"task_id={task_id}")
 
-    with open(destination, "wb") as f:
-        f.write(response.content)
+    # Write to a temp file in the same directory, then atomically publish via
+    # os.replace. This avoids leaving a partial/truncated file at
+    # `destination` if the process is killed mid-write, or if two concurrent
+    # callers race on the same task_id -- either way, `destination` only
+    # ever observes a complete file, matching the pattern used by
+    # elevenlabs_music.py, bgm.py, and sonilo.py for downloaded/generated
+    # media.
+    descriptor, temp_path = tempfile.mkstemp(
+        prefix=".minimax-download-",
+        suffix=".mp4",
+        dir=cache_dir,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as f:
+            f.write(response.content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, destination)
+        temp_path = ""
+    finally:
+        _remove_temp_file(temp_path)
     return destination
 
 
@@ -444,6 +464,8 @@ def generate_videos_minimax(
         )
         return []
 
+    width, height = aspect.to_resolution()
+
     item = MaterialInfo()
     item.provider = "minimax"
     item.url = local_path
@@ -452,6 +474,6 @@ def generate_videos_minimax(
         "provider": "minimax",
         "search_term": search_term,
         "asset_id": task_id,
-        "rendition": {"id": model, "width": None, "height": None},
+        "rendition": {"id": model, "width": width, "height": height},
     }
     return [item]

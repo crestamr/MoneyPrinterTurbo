@@ -493,6 +493,54 @@ class TestMiniMaxDownloadToCache(unittest.TestCase):
         destination = os.path.join(self.temp_dir, "minimax-task-expired.mp4")
         self.assertFalse(os.path.exists(destination))
 
+    def test_download_to_cache_writes_atomically(self):
+        # Regression test for Finding #2: verify the destination is written
+        # via a temp file + os.replace rather than a direct open().write(),
+        # so that no partial file can ever be observed at `destination`.
+        fake_response = SimpleNamespace(status_code=200, content=b"fake-video-bytes")
+        with patch(
+            "app.services.minimax_video.requests.get",
+            return_value=fake_response,
+        ), patch(
+            "app.services.minimax_video.os.replace",
+            wraps=os.replace,
+        ) as replace_mock:
+            result = minimax_video._download_to_cache(
+                "https://cdn.example.com/video.mp4", "task-atomic"
+            )
+
+        replace_mock.assert_called_once()
+        temp_arg = replace_mock.call_args.args[0]
+        self.assertNotEqual(temp_arg, result)
+        destination = os.path.join(self.temp_dir, "minimax-task-atomic.mp4")
+        self.assertEqual(result, destination)
+        with open(destination, "rb") as f:
+            self.assertEqual(f.read(), b"fake-video-bytes")
+        # No leftover temp file after a successful publish.
+        self.assertEqual(os.listdir(self.temp_dir), ["minimax-task-atomic.mp4"])
+
+    def test_download_to_cache_removes_partial_temp_file_on_write_failure(self):
+        # If the final os.replace publish fails partway (e.g. disk full,
+        # permission error), no partial file may linger anywhere in the
+        # cache directory -- not at `destination`, and not as an orphaned
+        # temp file either.
+        fake_response = SimpleNamespace(status_code=200, content=b"partial-bytes")
+        with patch(
+            "app.services.minimax_video.requests.get",
+            return_value=fake_response,
+        ), patch(
+            "app.services.minimax_video.os.replace",
+            side_effect=OSError("disk full"),
+        ):
+            with self.assertRaises(OSError):
+                minimax_video._download_to_cache(
+                    "https://cdn.example.com/video.mp4", "task-fail"
+                )
+
+        destination = os.path.join(self.temp_dir, "minimax-task-fail.mp4")
+        self.assertFalse(os.path.exists(destination))
+        self.assertEqual(os.listdir(self.temp_dir), [])
+
 
 class TestMiniMaxGenerateVideos(unittest.TestCase):
     def setUp(self):
@@ -559,6 +607,12 @@ class TestMiniMaxGenerateVideos(unittest.TestCase):
         self.assertEqual(
             item.source_info["search_term"], "golden retriever running on beach"
         )
+        # Regression test for Finding #1: rendition width/height must be
+        # real, non-None dimensions matching the requested aspect so that
+        # material.py's cache-hit revalidation (_matches_video_aspect) does
+        # not discard this entry on every cache read.
+        self.assertEqual(item.source_info["rendition"]["width"], 1080)
+        self.assertEqual(item.source_info["rendition"]["height"], 1920)
 
     def test_generate_videos_minimax_returns_empty_list_without_api_key(self):
         config.minimax_video["api_key"] = ""
