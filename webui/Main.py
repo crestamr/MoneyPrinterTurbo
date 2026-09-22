@@ -47,6 +47,7 @@ from app.services import (
     cache_manager,
     llm,
     loomloom,
+    minimax_video,
     video,
     voice,
     webui_task,
@@ -3240,6 +3241,7 @@ def _render_video_settings(panel, params):
                 (tr("Pexels"), "pexels"),
                 (tr("Pixabay"), "pixabay"),
                 (tr("Coverr"), "coverr"),
+                (tr("MiniMax H3 AI Video"), "minimax"),
                 (tr("Shengsuan Cloud AI Video"), "loomloom"),
                 (tr("Local file"), "local"),
             ]
@@ -5073,6 +5075,7 @@ def _render_generation_controls(
             "pexels",
             "pixabay",
             "coverr",
+            "minimax",
             "loomloom",
             "local",
         ]:
@@ -5099,6 +5102,14 @@ def _render_generation_controls(
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Coverr API Key"))
+            st.stop()
+
+        if (
+            params.video_source == "minimax"
+            and not minimax_video.get_minimax_video_api_key()
+        ):
+            _remove_active_generation_task(task_id)
+            st.error(tr("Please Enter the MiniMax API Key"))
             st.stop()
 
         loomloom_video_request = None

@@ -312,6 +312,8 @@
     "Coverr": "Coverr",
     "Coverr API Key": "Coverr API Key ([Get API Key](https://coverr.co/developers?ctx=header_navigation))",
     "Please Enter the Coverr API Key": "Please Enter the **Coverr API Key**",
+    "MiniMax H3 AI Video": "MiniMax H3 AI Video",
+    "Please Enter the MiniMax API Key": "Please Enter the **MiniMax API Key**",
     "Video Encoder": "Video Encoder",
     "Default Video Encoder": "Default (Recommended)",
     "Video Encoder Help": "Advanced option. Default follows the app's stable encoder policy, currently libx264. If a selected hardware encoder is unavailable, the app automatically falls back to libx264.",

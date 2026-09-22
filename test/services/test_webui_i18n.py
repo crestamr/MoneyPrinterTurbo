@@ -44,6 +44,8 @@ ENGLISH_FALLBACK_KEYS = frozenset(
         "Resume LoomLoom Status Check",
         "LoomLoom Quote Summary Singular",
         "LoomLoom Video Terms Reuse Help",
+        "MiniMax H3 AI Video",
+        "Please Enter the MiniMax API Key",
         "Script Generation Method",
         "Script Generation Method Help",
         "Shengsuan Cloud AI Video",
