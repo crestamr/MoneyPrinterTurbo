@@ -1104,6 +1104,11 @@ class TestMinimaxLocalFileHandling(unittest.TestCase):
         ) as generate_mock, patch(
             "app.services.material.save_video",
             return_value="/tmp/fake-saved-video.mp4",
+        ), patch(
+            "app.services.material.material_cache.load_material_search_cache",
+            return_value=None,
+        ), patch(
+            "app.services.material.material_cache.save_material_search_cache",
         ):
             paths = material.download_videos(
                 task_id="test-task",
