@@ -135,7 +135,14 @@ def _submit_and_wait(
             f"ComfyUI rejected the prompt: HTTP {response.status_code}: "
             f"{str(getattr(response, 'text', ''))[:200]}"
         )
-    prompt_id = response.json()["prompt_id"]
+    response_json = response.json()
+    prompt_id = (
+        response_json.get("prompt_id") if isinstance(response_json, dict) else None
+    )
+    if not prompt_id:
+        raise QwenImageAPIError(
+            f"ComfyUI /prompt response missing prompt_id: {response_json}"
+        )
 
     deadline = time.monotonic() + poll_timeout
     while time.monotonic() < deadline:
@@ -143,10 +150,18 @@ def _submit_and_wait(
             f"{base_url}/history/{prompt_id}",
             timeout=(DEFAULT_CONNECT_TIMEOUT_SECONDS, DEFAULT_REQUEST_TIMEOUT_SECONDS),
         )
+        if history_response.status_code != 200:
+            raise QwenImageAPIError(
+                f"ComfyUI /history/{prompt_id} returned HTTP "
+                f"{history_response.status_code}: "
+                f"{str(getattr(history_response, 'text', ''))[:200]}"
+            )
         history = history_response.json()
-        entry = history.get(prompt_id)
-        if entry:
+        entry = history.get(prompt_id) if isinstance(history, dict) else None
+        if isinstance(entry, dict):
             status = entry.get("status", {})
+            if not isinstance(status, dict):
+                status = {}
             if status.get("completed"):
                 return entry
             if status.get("status_str") == "error":
@@ -164,8 +179,11 @@ def _fetch_output_image(history_entry: dict, base_url: str) -> bytes:
     outputs = history_entry.get("outputs", {})
     for node_output in outputs.values():
         for image_info in node_output.get("images", []):
+            filename = image_info.get("filename")
+            if not filename:
+                continue
             params = {
-                "filename": image_info["filename"],
+                "filename": filename,
                 "subfolder": image_info.get("subfolder", ""),
                 "type": image_info.get("type", "output"),
             }
@@ -240,7 +258,6 @@ def generate_images_qwen(
         return []
 
     cache_dir = utils.storage_dir("qwen_image_generated", create=True)
-    os.makedirs(cache_dir, exist_ok=True)
     image_path = os.path.join(cache_dir, f"qwen-{uuid.uuid4().hex}.png")
     with open(image_path, "wb") as f:
         f.write(image_bytes)

@@ -13,6 +13,18 @@ from app.models.schema import VideoAspect
 from app.services import qwen_image
 
 
+def _fake_storage_dir(root):
+    """Stand-in for utils.storage_dir that honors its create=True contract."""
+
+    def storage_dir(sub_dir, create=False):
+        path = os.path.join(root, sub_dir)
+        if create:
+            os.makedirs(path, exist_ok=True)
+        return path
+
+    return storage_dir
+
+
 class TestQwenImageSettings(unittest.TestCase):
     def setUp(self):
         self.original_qwen_image_config = dict(config.qwen_image)
@@ -89,9 +101,7 @@ class TestGenerateImagesQwen(unittest.TestCase):
             return_value="a golden retriever running on a sunlit beach",
         ), patch(
             "app.services.qwen_image.utils.storage_dir",
-            side_effect=lambda sub_dir, create=False: os.path.join(
-                fake_storage, sub_dir
-            ),
+            side_effect=_fake_storage_dir(fake_storage),
         ), patch(
             "app.services.qwen_image.video.render_image_as_zoom_clip",
             side_effect=lambda image_path, duration: f"{image_path}.mp4",
@@ -115,6 +125,24 @@ class TestGenerateImagesQwen(unittest.TestCase):
         with patch(
             "app.services.qwen_image.requests.post",
             side_effect=qwen_image.requests.RequestException("connection refused"),
+        ):
+            results = qwen_image.generate_images_qwen(
+                search_term="golden retriever beach",
+                minimum_duration=5,
+                video_aspect=VideoAspect.portrait,
+            )
+
+        self.assertEqual(results, [])
+
+    def test_generate_images_qwen_returns_empty_list_on_malformed_prompt_response(self):
+        malformed_response = SimpleNamespace(status_code=200, json=lambda: {})
+
+        with patch(
+            "app.services.qwen_image.requests.post",
+            return_value=malformed_response,
+        ), patch(
+            "app.services.qwen_image.llm.generate_image_prompt",
+            return_value="a golden retriever running on a sunlit beach",
         ):
             results = qwen_image.generate_images_qwen(
                 search_term="golden retriever beach",
