@@ -48,6 +48,7 @@ from app.services import (
     llm,
     loomloom,
     minimax_video,
+    qwen_image,
     video,
     voice,
     webui_task,
@@ -3243,6 +3244,7 @@ def _render_video_settings(panel, params):
                 (tr("Coverr"), "coverr"),
                 (tr("MiniMax H3 AI Video"), "minimax"),
                 (tr("Shengsuan Cloud AI Video"), "loomloom"),
+                (tr("Qwen-Image 2.1 (Local AI)"), "qwen_image"),
                 (tr("Local file"), "local"),
             ]
 
@@ -5077,6 +5079,7 @@ def _render_generation_controls(
             "coverr",
             "minimax",
             "loomloom",
+            "qwen_image",
             "local",
         ]:
             _remove_active_generation_task(task_id)
@@ -5115,6 +5118,11 @@ def _render_generation_controls(
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the MiniMax API Key"))
+            st.stop()
+
+        if params.video_source == "qwen_image" and not qwen_image.is_comfyui_reachable():
+            _remove_active_generation_task(task_id)
+            st.error(tr("Could Not Connect to ComfyUI"))
             st.stop()
 
         loomloom_video_request = None
