@@ -1289,10 +1289,10 @@ def generate_video(
     video_width, video_height = aspect.to_resolution()
 
     logger.info(f"generating video: {video_width} x {video_height}")
-    logger.info(f"  ① video: {video_path}")
-    logger.info(f"  ② audio: {audio_path}")
-    logger.info(f"  ③ subtitle: {subtitle_path}")
-    logger.info(f"  ④ output: {output_file}")
+    logger.info(f"  1. video: {video_path}")
+    logger.info(f"  2. audio: {audio_path}")
+    logger.info(f"  3. subtitle: {subtitle_path}")
+    logger.info(f"  4. output: {output_file}")
 
     # https://github.com/harry0703/MoneyPrinterTurbo/issues/217
     # PermissionError: [WinError 32] The process cannot access the file because it is being used by another process: 'final-1.mp4.tempTEMP_MPY_wvf_snd.mp3'
@@ -1307,7 +1307,7 @@ def generate_video(
         if os.name == "nt":
             font_path = font_path.replace("\\", "/")
 
-        logger.info(f"  ⑤ font: {font_path}")
+        logger.info(f"  5. font: {font_path}")
 
     def resolve_subtitle_background_color():
         # 兼容历史参数：API 里 `text_background_color` 既可能是布尔值，
