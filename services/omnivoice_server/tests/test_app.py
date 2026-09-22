@@ -95,6 +95,25 @@ class TestApp(unittest.TestCase):
         # The idle sweeper must not reclaim the model right after a long call.
         self.engine.touch.assert_called_once()
 
+    def test_speech_reports_a_model_load_failure_with_a_usable_detail(self):
+        engine = MagicMock()
+        type(engine).model = property(
+            lambda self: (_ for _ in ()).throw(RuntimeError("CUDA out of memory"))
+        )
+        client = TestClient(
+            app_module.create_app(settings=self.settings, engine=engine)
+        )
+
+        response = client.post(
+            "/v1/audio/speech",
+            json={"model": "omnivoice", "input": "Hi.", "voice": "narrator"},
+        )
+
+        self.assertEqual(response.status_code, 500)
+        # A bare "Internal Server Error" leaves the user nothing to act on; an
+        # OOM here usually means ComfyUI is holding the GPU.
+        self.assertIn("CUDA out of memory", response.json()["detail"])
+
     def test_speech_rejects_empty_input(self):
         response = self.client.post(
             "/v1/audio/speech",

@@ -97,6 +97,15 @@ def create_app(*, settings: Settings, engine: Engine) -> FastAPI:
             )
         except SynthesisError as error:
             raise HTTPException(status_code=500, detail=str(error)) from error
+        except Exception as error:
+            # Loading the model can fail for reasons synthesis never sees —
+            # most likely CUDA OOM when another local workload (ComfyUI) already
+            # holds the GPU, or missing weights. Without this the client gets a
+            # bare "Internal Server Error" and the user has nothing to act on.
+            raise HTTPException(
+                status_code=500,
+                detail=f"OmniVoice model unavailable: {type(error).__name__}: {error}",
+            ) from error
         finally:
             # Stamp the model as freshly used: a synthesis longer than the idle
             # timeout must not be swept away while its own request is running.
