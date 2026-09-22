@@ -91,6 +91,7 @@ ENGLISH_FALLBACK_KEYS = frozenset(
         "Confirm MuAPI Charge Help",
         "Confirm MuAPI Charge Required",
         "MiniMax H3 AI Video",
+        "OmniVoice Service Unavailable",
         "Please Enter the MiniMax API Key",
         "Qwen-Image 2.1 (Local AI)",
         "Script Generation Method",

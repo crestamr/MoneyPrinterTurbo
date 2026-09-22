@@ -568,6 +568,39 @@ def _get_kokoro_voice_options(saved_voice_name: str) -> list[str]:
     return options or [f"kokoro:{voice.KOKORO_DEFAULT_VOICE}"]
 
 
+def _get_omnivoice_voice_options(saved_voice_name: str) -> list[str]:
+    """与 Kokoro 同样在会话内短缓存远端目录，避免反复等待一个已知离线的服务。
+
+    区别在于 OmniVoice 的音色就是 storage/voices 下的参考音频，没有内置默认
+    音色可以兜底：服务没启动时只能返回空列表，由调用方提示用户先启动服务。
+    """
+    signature = (
+        (config.omnivoice.get("base_url") or "").strip().rstrip("/"),
+        _credential_signature(config.omnivoice.get("api_key", "")),
+    )
+    catalog = st.session_state.get("omnivoice_voice_catalog", {})
+    if catalog.get("signature") != signature:
+        catalog = {"signature": signature, "voices": [], "checked_at": None}
+    now = time.monotonic()
+    if catalog["checked_at"] is None or now - catalog["checked_at"] >= 30:
+        fetched = voice.get_omnivoice_voices()
+        catalog.update(checked_at=now, available=bool(fetched))
+        if fetched:
+            catalog["voices"] = fetched
+        st.session_state["omnivoice_voice_catalog"] = catalog
+
+    options = list(catalog["voices"])
+    if not catalog["available"]:
+        st.warning(tr("OmniVoice Service Unavailable"))
+        # 服务离线不等于用户删掉了参考音频，保留上次选择，重启服务后可以直接继续。
+        if (
+            voice.is_omnivoice_voice(saved_voice_name)
+            and saved_voice_name not in options
+        ):
+            options.insert(0, saved_voice_name)
+    return options
+
+
 def _detect_audio_mime(audio_file: str, audio_bytes: bytes) -> str:
     # 有些 OpenAI-compatible TTS 服务，例如 travisvn/chatterbox-tts-api，
     # 即使请求 response_format=mp3，也会返回 WAV 内容。WebUI 试听如果固定
@@ -1423,6 +1456,8 @@ def _infer_tts_server_from_voice(voice_name):
         return "chatterbox"
     if voice.is_kokoro_voice(voice_name):
         return "kokoro"
+    if voice.is_omnivoice_voice(voice_name):
+        return "omnivoice"
     if voice.is_fish_audio_voice(voice_name):
         return "fish_audio"
     if voice.is_voxcpm_voice(voice_name):
@@ -5917,6 +5952,12 @@ def _get_voice_preview_provider_signature(tts_server: str) -> dict:
             "model_id": config.kokoro.get("model_id", ""),
             "credential": _credential_signature(config.kokoro.get("api_key", "")),
         }
+    if tts_server == "omnivoice":
+        return {
+            "base_url": config.omnivoice.get("base_url", ""),
+            "model_id": config.omnivoice.get("model_id", ""),
+            "credential": _credential_signature(config.omnivoice.get("api_key", "")),
+        }
     if tts_server == "voxcpm":
         return {
             "base_url": config.voxcpm.get("base_url", ""),
@@ -6822,6 +6863,7 @@ def _render_audio_settings(panel, params):
                 ("elevenlabs", "ElevenLabs TTS"),
                 ("chatterbox", "Chatterbox TTS"),
                 ("kokoro", "Kokoro TTS"),
+                ("omnivoice", "OmniVoice TTS"),
                 ("fish_audio", "Fish Audio TTS"),
                 ("voxcpm", "VoxCPM TTS"),
             ]
@@ -6897,6 +6939,10 @@ def _render_audio_settings(panel, params):
                 # 自托管 Kokoro 服务的音色：[kokoro] voices 为空时从服务端 /audio/voices 读取
                 _sync_kokoro_config_from_session_state()
                 filtered_voices = _get_kokoro_voice_options(saved_voice_name)
+            elif selected_tts_server == "omnivoice":
+                # 本地 OmniVoice 服务的音色来自 storage/voices 下的参考音频，
+                # 只能从服务端 /audio/voices 读取；服务未启动时列表为空。
+                filtered_voices = _get_omnivoice_voice_options(saved_voice_name)
             elif selected_tts_server == "fish_audio":
                 filtered_voices = voice.get_fish_audio_voices()
             elif selected_tts_server == "voxcpm":
@@ -6934,6 +6980,9 @@ def _render_audio_settings(panel, params):
                         display_name.replace("Female", tr("Female"))
                         .replace("Male", tr("Male"))
                     )
+                if voice.is_omnivoice_voice(v):
+                    # 音色名就是参考音频的文件名，原样展示最容易对上磁盘内容。
+                    return v.split(":", 1)[1] or v
                 if voice.is_voxcpm_voice(v):
                     return v.split(":", 1)[1] or DEFAULT_VOXCPM_VOICE
                 return (
@@ -8013,6 +8062,15 @@ def _render_generation_controls(
         if params.video_source == "qwen_image" and not qwen_image.is_comfyui_reachable():
             _remove_active_generation_task(task_id)
             st.error(tr("Could Not Connect to ComfyUI"))
+            st.stop()
+
+        # 和 ComfyUI 一样是需要用户手动启动的本地服务：在写文案、调 LLM、下素材
+        # 之前先探活，避免跑了几分钟才在最后一步合成配音时失败。
+        if voice.is_omnivoice_voice(params.voice_name) and not (
+            voice.is_omnivoice_reachable()
+        ):
+            _remove_active_generation_task(task_id)
+            st.error(tr("OmniVoice Service Unavailable"))
             st.stop()
 
         loomloom_video_request = None
