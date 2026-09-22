@@ -1330,6 +1330,25 @@ def generate_video(
         )
         return bgm_mix_succeeded
 
+def render_image_as_zoom_clip(image_path: str, duration: float) -> str:
+    """Render a still image as an .mp4 with a subtle Ken Burns zoom effect.
+
+    The zoom starts at the image's original size and gradually scales up to
+    120% over `duration` seconds. Returns the path to the written .mp4 file
+    (image_path with ".mp4" appended).
+    """
+    clip = ImageClip(image_path).with_duration(duration).with_position("center")
+    zoom_clip = clip.resized(lambda t: 1 + (duration * 0.03) * (t / clip.duration))
+    final_clip = CompositeVideoClip([zoom_clip])
+
+    video_file = f"{image_path}.mp4"
+    final_clip.write_videofile(video_file, fps=30, logger=None)
+    close_clip(clip)
+    close_clip(final_clip)
+    return video_file
+
+
+
 
 def preprocess_video(
     materials: List[MaterialInfo],
@@ -1425,32 +1444,11 @@ def preprocess_video(
 
             if ext in const.FILE_TYPE_IMAGES:
                 logger.info(f"processing image: {material_source_path}")
-                # 探测尺寸时已经打开过一次素材，这里先释放探测句柄，再重新创建用于导出的图片 clip。
+                # 探测尺寸时已经打开过一次素材，这里先释放探测句柄，再交给共享渲染函数。
                 close_clip(clip)
-                # Create an image clip and set its duration to 3 seconds
-                clip = (
-                    ImageClip(material_source_path)
-                    .with_duration(clip_duration)
-                    .with_position("center")
+                video_file = render_image_as_zoom_clip(
+                    material_source_path, duration=clip_duration
                 )
-                # Apply a zoom effect using the resize method.
-                # A lambda function is used to make the zoom effect dynamic over time.
-                # The zoom effect starts from the original size and gradually scales up to 120%.
-                # t represents the current time, and clip.duration is the total duration of the clip (3 seconds).
-                # Note: 1 represents 100% size, so 1.2 represents 120% size.
-                zoom_clip = clip.resized(
-                    lambda t: 1 + (clip_duration * 0.03) * (t / clip.duration)
-                )
-
-                # Optionally, create a composite video clip containing the zoomed clip.
-                # This is useful when you want to add other elements to the video.
-                final_clip = CompositeVideoClip([zoom_clip])
-
-                # Output the video to a file.
-                video_file = f"{material_source_path}.mp4"
-                final_clip.write_videofile(video_file, fps=30, logger=None)
-                close_clip(clip)
-                close_clip(final_clip)
                 material.url = video_file
                 logger.success(f"image processed: {video_file}")
             else:
