@@ -13,6 +13,18 @@ listen_port = 8080
 
 [app]
 
+# Optional protection for API routes and generated files under /tasks.
+# Leave empty for local backward-compatible access. When configured, clients
+# must send the same value in the x-api-key request header. Keep real keys only
+# in config.toml and never commit them.
+# API 路由和 /tasks 生成文件的可选保护。留空时保持本地免认证行为；
+# 配置后客户端必须通过 x-api-key 请求头传入同一个值。
+# Task artifact requests also require this header; a browser address bar cannot
+# attach custom headers, so authenticated clients should download them via HTTP.
+# 任务产物下载同样需要该请求头；浏览器地址栏无法附加自定义请求头，启用鉴权后
+# 应由 API 客户端携带请求头下载。
+api_key = ""
+
 # -----------------------------------------------------------------------------
 # General / 通用设置
 # -----------------------------------------------------------------------------
@@ -50,10 +62,19 @@ tls_verify = true
 # Video Materials / 视频素材
 # -----------------------------------------------------------------------------
 
-# Available values: "pexels", "pixabay", "coverr", "minimax", "qwen_image",
-# "loomloom", "local".
+# Available values: "pexels", "pixabay", "coverr", "wavespeed",
+# "volcengine_seedance", "ofox", "metaso_minimax", "minimax", "muapi",
+# "qwen_image", "loomloom", "openai_image", "local".
+# "wavespeed" generates brand-new clips with WaveSpeed AI text-to-video models
+# instead of searching stock footage; generation is billed per request.
 # "loomloom" is a paid Shengsuan Cloud source and requires explicit
 # confirmation in the WebUI before each generation request.
+# "ofox" generates brand-new clips through the OFox multi-model video API
+# (Seedance / Wan and other text-to-video models behind one key); generation
+# is billed per submitted clip.
+# "openai_image" generates one image per script keyword through any
+# OpenAI-compatible /images/generations endpoint (local ComfyUI/SD gateways
+# or cloud relays) and renders it into a video clip.
 video_source = "pexels"
 
 # Minimum width and height (in pixels) a material must have to be used.
@@ -77,6 +98,123 @@ pixabay_api_keys = []
 
 # Register at https://coverr.co/developers?ctx=header_navigation
 coverr_api_keys = []
+
+# WaveSpeed AI generates clips from your script keywords with text-to-video
+# models. Create an API key at https://wavespeed.ai
+wavespeed_api_keys = []
+# Optional. Any WaveSpeed text-to-video model id that accepts
+# prompt / aspect_ratio / duration works here.
+# wavespeed_text_to_video_model = "bytedance/seedance-2.0-fast/text-to-video"
+# The default model only accepts durations of 4-15 seconds. Requested clip
+# durations outside the range are clamped automatically before submission
+# (extra footage is trimmed by the editing pipeline). Override only if your
+# chosen model supports a different range.
+# wavespeed_min_duration = 4
+# wavespeed_max_duration = 15
+
+# Volcano Engine Ark Seedance uses the official asynchronous video-generation API.
+# Create an Ark API key at:
+# https://console.volcengine.com/ark/region:ark+cn-beijing/apikey
+# When empty, VOLCENGINE_ARK_API_KEY is used, followed by the existing
+# volcengine_api_key LLM setting. A single provider-specific environment variable
+# avoids ambiguity with unrelated SDKs that may also use generic Ark names.
+# Generation is billed per submitted clip.
+volcengine_seedance_api_key = ""
+volcengine_seedance_base_url = "https://ark.cn-beijing.volces.com/api/v3"
+# This stable official model supports text-to-video, 2-12 second clips and 1080p.
+# You may replace it with an enabled model or Endpoint ID from your Ark account.
+volcengine_seedance_model = "doubao-seedance-1-0-pro-250528"
+volcengine_seedance_resolution = "1080p" # "480p", "720p", or "1080p"
+volcengine_seedance_min_duration = 2
+volcengine_seedance_max_duration = 12
+volcengine_seedance_poll_interval = 5
+volcengine_seedance_run_timeout = 1800
+volcengine_seedance_watermark = false
+
+# OFox (https://ofox.ai) exposes multiple text-to-video models (Seedance, Wan,
+# and more) behind one API key using an asynchronous /v1/videos API.
+# Create an API key at https://ofox.ai
+# When empty, the OFOX_API_KEY environment variable is used.
+# Generation is billed per submitted clip.
+ofox_api_key = ""
+ofox_base_url = "https://api.ofox.ai/v1"
+# Any text-to-video model id from the OFox catalog (GET /v1/models) works here.
+ofox_text_to_video_model = "bytedance/seedance-2.0-fast"
+# Supported resolutions depend on the chosen model (the default model accepts
+# "480p" and "720p"); invalid values are rejected by the API with a clear
+# error before any task is created.
+ofox_resolution = "720p"
+# The default model only accepts durations of 4-15 seconds; other models have
+# different ranges (for example alibaba/wan-2.7 accepts 2-15 seconds).
+# Requested clip durations outside the range are clamped automatically before
+# submission (extra footage is trimmed by the editing pipeline).
+ofox_min_duration = 4
+ofox_max_duration = 15
+# Upstream vendor pinning. Some models are served by multiple upstream
+# vendors (for example the Seedance series is available from both
+# "volcengine" and "byteplus"). Vendors apply their own content policies and
+# regional availability. The default pins "byteplus" (the international
+# vendor) for a consistent content policy and predictable routing; set
+# "volcengine" for the mainland-China vendor, or set an empty string "" to
+# let OFox load-balance across the available vendors. Unknown vendor names
+# are rejected by the API before any task is created. Note: vendor coverage
+# is per model — the default pinning targets the Seedance series; when
+# switching to a non-Seedance model (e.g. alibaba/wan-2.7), set the matching
+# vendor or an empty string, otherwise the API rejects the request with
+# provider_type_unavailable (no task is created, nothing is billed).
+ofox_provider = "byteplus"
+ofox_poll_interval = 5
+ofox_run_timeout = 1800
+
+# MuAPI exposes asynchronous text-to-video endpoints under the public API.
+# Create a key at https://muapi.ai and keep the API base URL rooted at
+# https://api.muapi.ai/api/v1 (the endpoint value is a relative path below it).
+# When empty, MUAPI_API_KEY is used. Generation is billed per submitted clip;
+# the WebUI and CLI require explicit charge confirmation before generation.
+muapi_api_key = ""
+muapi_base_url = "https://api.muapi.ai/api/v1"
+# The budget Seedance Lite route accepts 3-12 second clips and 480p/720p/1080p.
+muapi_video_endpoint = "seedance-lite-t2v"
+muapi_resolution = "480p"
+muapi_min_duration = 3
+muapi_max_duration = 12
+muapi_poll_interval = 5
+muapi_run_timeout = 1800
+
+# Metaso proxies the MiniMax H3 V2 asynchronous video API. Register and obtain
+# an independent API key through https://metaso.cn/minimax-h3/?s=MPT. Its mk-*
+# key belongs to a separate credential system and must not reuse the MiniMax LLM key.
+# When this value is empty, METASO_MINIMAX_API_KEY is used. Generation is billed
+# per submitted clip; the WebUI and CLI require explicit charge confirmation.
+metaso_minimax_api_key = ""
+metaso_minimax_base_url = "https://metaso.cn/api/minimax"
+metaso_minimax_resolution = "2K" # "768P" or "2K"
+metaso_minimax_poll_interval = 10
+metaso_minimax_run_timeout = 1800
+
+# OpenAI-compatible text-to-image material source ("openai_image"). Point the
+# base URL at any endpoint that speaks the OpenAI /images/generations protocol:
+# a local ComfyUI/SD gateway, a self-hosted relay, or a cloud aggregator.
+# Images are generated on demand (one per script keyword, billed per image by
+# your provider) and rendered into short zoom-effect video clips.
+# Example: "https://api.openai.com/v1" or "http://127.0.0.1:8080/v1"
+openai_image_base_url = ""
+# Optional for local gateways that need no auth. Leave empty to send requests
+# without an Authorization header; provide one or more keys for cloud relays.
+openai_image_api_keys = []
+# Any image model id your endpoint accepts, for example a local SD checkpoint
+# alias or a provider model name.
+openai_image_model = ""
+# Optional image size sent to the endpoint. The official OpenAI image API only
+# accepts model-defined sizes (e.g. 1024x1024, 1024x1536, 1536x1024 or "auto"),
+# so the default picks a compatible size per video aspect (portrait 1024x1536,
+# landscape 1536x1024, square 1024x1024). Set a custom value (e.g. "1080x1920")
+# for local gateways that accept arbitrary resolutions.
+openai_image_size = ""
+# Optional prompt template applied to every search term. Use the "{term}"
+# placeholder to inject the keyword; leave empty to send terms as-is.
+# Example: "cinematic photo of {term}, photorealistic, high detail"
+openai_image_prompt_template = ""
 
 # Optional TwelveLabs integration for semantic material ranking and video QA.
 # Install the optional dependency with: uv sync --extra twelvelabs
@@ -122,11 +260,31 @@ shengsuanyun_api_key = ""
 shengsuanyun_base_url = ""
 shengsuanyun_model_name = ""
 
+# APIMart, OpenAI-compatible multi-model API.
+# Sign up: https://go.apimart.ai/gh-moneyprinterturbo
+# API docs: https://docs.apimart.ai/cn
+apimart_api_key = ""
+apimart_base_url = ""
+apimart_model_name = ""
+
+# Fluxion AI：使用 OpenAI 接口分组的 API Key，地址和模型可按分组覆盖。
+# 留空时默认使用 https://fluxionai.space/v1 和 gpt-5.5。
+# 模型广场：https://fluxionai.space/model-plaza
+fluxionai_api_key = ""
+fluxionai_base_url = ""
+fluxionai_model_name = ""
+
 # OpenAI or another OpenAI Chat Completions-compatible provider.
 # API key: https://platform.openai.com/api-keys
 openai_api_key = ""
 openai_base_url = ""
 openai_model_name = ""
+
+# Anthropic Claude, called through the OpenAI-compatible endpoint.
+# API key: https://platform.claude.com/settings/keys
+anthropic_api_key = ""
+anthropic_base_url = ""
+anthropic_model_name = ""
 
 # Google Gemini
 # API key: https://aistudio.google.com/app/apikey
@@ -208,10 +366,40 @@ evolink_api_key = ""
 evolink_base_url = ""
 evolink_model_name = ""
 
+# OpenRouter, an OpenAI-compatible multi-model gateway.
+# API key: https://openrouter.ai/settings/keys
+# Free models: https://openrouter.ai/models?variant=free
+openrouter_api_key = ""
+openrouter_base_url = ""
+openrouter_model_name = ""
+
+# API Route, an OpenAI-compatible multi-model routing platform.
+# API key: https://www.api-route.com
+# Model list: https://www.api-route.com/pricing
+api_route_api_key = ""
+api_route_base_url = ""
+api_route_model_name = ""
+
 # Ollama. Leave base_url empty to use the environment-aware local default.
 # Set model_name to a model installed by `ollama pull` or shown by `ollama list`.
 ollama_base_url = ""
 ollama_model_name = ""
+
+# Claude Code (Claude Pro / Max / Team subscription).
+# Uses the locally installed, logged-in `claude` CLI in headless mode instead of
+# an API key, so no Anthropic API credit is needed. Requirements:
+#   - the `claude` CLI must be installed in whatever runs MoneyPrinterTurbo
+#   - it must be authenticated: interactively via `claude` on the host, or with
+#     a long-lived token from `claude setup-token` exported as
+#     CLAUDE_CODE_OAUTH_TOKEN (needed for Docker)
+# Leave model_name empty to use the CLI's current default model, or set one such
+# as "claude-opus-5" / "claude-sonnet-5". Leave cli_path empty to resolve
+# `claude` from PATH. Leave timeout empty to use the 300s default.
+# Calls use your Claude subscription usage limits; conflicting ANTHROPIC_* and
+# CLAUDE_CODE_USE_* environment variables are removed before the CLI runs.
+claude_code_model_name = ""
+claude_code_cli_path = ""
+claude_code_timeout = ""
 
 # OneAPI. Use the token, Base URL, and model ID from your OneAPI deployment.
 # Project: https://github.com/songquanpeng/one-api
@@ -301,6 +489,13 @@ upload_post_platforms = ["tiktok", "instagram"]
 upload_post_auto_upload = false
 # YouTube privacy: "public", "unlisted", or "private".
 upload_post_youtube_privacy_status = "public"
+# Declare whether the video is made for children. Choose based on its audience.
+# If unset, future YouTube uploads explicitly declare "not made for kids".
+# Set true for children's content. Previously uploaded videos are not changed.
+# 是否面向儿童：请根据视频实际受众设置，必须使用 TOML 布尔值 true / false。
+# 未配置时，后续 YouTube 上传默认声明为非面向儿童；儿童内容请显式设置为 true。
+# 与旧版省略声明字段不同，此设置不会修改已上传的视频。
+upload_post_youtube_made_for_kids = false
 # Maximum number of running and queued cross-post jobs per process. When the
 # limit is reached, video generation still succeeds and only cross-posting is
 # rejected.
@@ -348,6 +543,8 @@ compute_type = "int8"
 # When api_key is empty, the MiniMax LLM key (app.minimax_api_key) and its
 # matching regional endpoint are reused automatically, the same way MiniMax
 # TTS already does below.
+# This is the official MiniMax platform account; it is separate from the
+# Metaso-proxied "metaso_minimax" source configured in [app] above.
 api_key = ""
 base_url = ""
 # "MiniMax-H3" (768P/2K, 4-15s) or "MiniMax-H3-Max" (480P/768P, 5-15s, cheaper/faster).
@@ -416,6 +613,9 @@ api_key = ""
 # Available models include eleven_multilingual_v2, eleven_flash_v2_5, and eleven_v3.
 model_id = "eleven_multilingual_v2"
 # Video-to-Music uses a separate model family while sharing the same API key.
+# music_base_url only configures the Video-to-Music endpoint, so it can point at
+# a proxy or a self-hosted gateway while the voice API keeps the default host.
+music_base_url = "https://api.elevenlabs.io"
 music_model_id = "music_v2"
 music_timeout = 600
 
@@ -427,6 +627,51 @@ api_key = ""
 model_id = "chatterbox"
 # Voice names exposed by the configured Chatterbox server.
 voices = ["default-Female"]
+
+[kokoro]
+# OpenAI-compatible Kokoro TTS server (hexgrad/Kokoro-82M, Apache-2.0, runs on CPU).
+# The defaults target remsky/Kokoro-FastAPI running locally on port 8880.
+base_url = "http://127.0.0.1:8880/v1"
+api_key = ""
+model_id = "kokoro"
+# Voice names (af_heart, bf_emma, hf_alpha, ...). Leave empty to read the list
+# from the server (GET {base_url}/audio/voices).
+voices = []
+
+[fish_audio]
+# Fish Audio TTS service: https://fish.audio
+# API key: https://fish.audio/app/developers
+# You can also set the FISH_API_KEY environment variable.
+api_key = ""
+# Available models: "s2.1-pro-free", "s2.1-pro", "s2-pro"
+model = "s2.1-pro-free"
+
+# ── Voice selection ──────────────────────────────────────────────────────────
+# Built-in presets for clear female, male, and neutral default voices are
+# available out of the box.  To use additional public or cloned voices, add
+# entries below.  Each entry is either:
+#   "<reference_id>:<display_name>"   – a Fish Audio voice model ID with label
+#   "<reference_id>"                  – bare ID (used as both ID and label)
+#
+# Browse public voices at https://fish.audio and copy the model ID from the URL.
+# Example: voices = ["7f92f8afb8ec43bf81429cc1c9199cb1:Friendly Narrator"]
+voices = []
+
+# ── Model & Pricing Notice ───────────────────────────────────────────────────
+# The "s2.1-pro-free" model is provided under Fish Audio's developer terms and
+# is subject to Fair Use Policy, rate limits, and time-limited promotional
+# windows (e.g. through August 2026).  There is no SLA.  Please check
+# https://fish.audio/pricing for current availability and commercial terms.
+
+[voxcpm]
+# ModelBest VoxCPM cloud TTS. Create an API Key and select a model with the
+# `speech_synthesis` capability at https://platform.modelbest.cn/console/
+# The Audio Speech API returns a streaming WAV response; MoneyPrinterTurbo
+# converts it to its internal MP3 voiceover format automatically.
+base_url = "https://api.modelbest.cn/v1"
+api_key = ""
+model_id = ""
+voice_id = "default"
 
 # =============================================================================
 # WebUI Preferences / WebUI 偏好
@@ -453,11 +698,13 @@ open_task_folder_on_completion = true
 # video_concat_mode = "random"       # "random" or "sequential"
 # video_transition_mode = "None"     # "None", "Shuffle", "FadeIn", etc.
 # video_aspect_pexels = "9:16"       # Stored separately for each video source.
+# video_fit_mode = "cover"           # "cover" fills/crops; "contain" adds black bars.
 # video_clip_duration = 3
 # video_clip_speed = 1.0
 # video_count = 1
 # tts_server = "azure-tts-v1"
 # voice_name = ""
+# voice_mode = "tts"                 # "tts", "upload", or "none"
 # voice_volume = 1.0
 # voice_rate = 1.0
 # bgm_type = "random"
@@ -466,12 +713,14 @@ open_task_folder_on_completion = true
 # sonilo_bgm_prompt = ""
 # elevenlabs_music_prompt = ""
 # subtitle_enabled = true
+# subtitle_display_mode = "sentence" # "sentence" or "word_by_word"
+# subtitle_animation = "none"        # "none" or "pop_spring"
 # font_name = "MicrosoftYaHeiBold.ttc"
 # font_size = 60
 # text_fore_color = "#FFFFFF"
 # stroke_color = "#000000"
 # stroke_width = 1.5
-# subtitle_position = "bottom" # "top", "center", "bottom", or "custom"
+# subtitle_position = "bottom" # "top", "center", "bottom", "two_thirds_bottom", or "custom"
 # custom_position = 70.0       # Percentage from the top when using "custom"
 # subtitle_background_enabled = false
 # subtitle_background_color = "#000000"

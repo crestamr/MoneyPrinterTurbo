@@ -32,6 +32,18 @@ RUN_INTEGRATION_TESTS = os.environ.get("MPT_RUN_INTEGRATION_TESTS", "").lower() 
 
 
 class TestScriptPromptOptions(unittest.TestCase):
+    def test_normalize_text_response_preserves_internal_newlines(self):
+        """
+        归一化只清理首尾空白，不能删除正文内部的换行。双换行用于区分脚本
+        段落，单换行也可能是模型按语义返回的字幕行。
+        """
+        result = llm._normalize_text_response(
+            "\n  第一行\n第二行\n\n第三段  \n",
+            "openai",
+        )
+
+        self.assertEqual(result, "第一行\n第二行\n\n第三段")
+
     def test_normalize_text_response_removes_think_blocks(self):
         """
         reasoning 模型可能返回 `<think>...</think>`。脚本生成链路必须只保留
@@ -143,6 +155,39 @@ class TestScriptPromptOptions(unittest.TestCase):
         self.assertIs(captured["app_config"], app_config)
         self.assertEqual(captured["app_config"]["openai_api_key"], "snapshot-key")
 
+    def test_generate_script_strips_each_bracket_group_independently(self):
+        """
+        format_response must remove each [bracket] and (paren) group in
+        isolation.  The greedy form [.*] matches from the first opener to
+        the *last* closer on the line, silently deleting all text in between.
+
+        Example – greedy bug:
+            "[Intro] Great content [end]"  →  "."     (all inner text lost)
+        Expected with non-greedy fix:
+            "[Intro] Great content [end]"  →  " Great content "
+        """
+
+        def fake_generate_response(prompt):
+            # Two bracket groups and two paren groups on the same line.
+            return (
+                "[Scene: Beach] A beautiful day at the [location: ocean].\n\n"
+                "Save (at least) 10% of your income (monthly)."
+            )
+
+        with patch.object(
+            llm, "_generate_response", side_effect=fake_generate_response
+        ):
+            result = llm.generate_script(video_subject="savings tips", language="en-US")
+
+        # Each bracket / paren group should be gone, but the surrounding words
+        # must survive.
+        self.assertNotIn("[", result)
+        self.assertNotIn("]", result)
+        self.assertNotIn("(", result)
+        self.assertNotIn(")", result)
+        self.assertIn("A beautiful day at the", result)
+        self.assertIn("10% of your income", result)
+
     def test_generate_terms_can_request_script_ordered_keywords(self):
         """
         按文案顺序匹配素材依赖 LLM 返回有序关键词。这里不调用真实模型，
@@ -252,6 +297,11 @@ class TestLiteLLMProvider(unittest.TestCase):
     def test_current_default_model_names(self):
         """WebUI 与服务层必须共享同一组默认模型，避免展示值和请求值漂移。"""
         self.assertEqual(get_llm_provider("openai").default_model, "gpt-5.5")
+        anthropic = get_llm_provider("anthropic")
+        self.assertEqual(anthropic.default_model, "claude-sonnet-5")
+        self.assertEqual(anthropic.default_base_url, "https://api.anthropic.com/v1/")
+        self.assertEqual(anthropic.adapter, "openai_compatible")
+        self.assertTrue(anthropic.requires_api_key)
         self.assertEqual(get_llm_provider("aimlapi").default_model, "openai/gpt-5-5")
         self.assertEqual(get_llm_provider("deepseek").default_model, "deepseek-v4-pro")
         self.assertEqual(
@@ -260,6 +310,16 @@ class TestLiteLLMProvider(unittest.TestCase):
         self.assertEqual(
             get_llm_provider("gemini").default_model, "gemini-3.1-pro-preview"
         )
+        openrouter = get_llm_provider("openrouter")
+        self.assertEqual(openrouter.default_model, "minimax/minimax-m3:free")
+        self.assertEqual(openrouter.default_base_url, "https://openrouter.ai/api/v1")
+        self.assertEqual(openrouter.adapter, "openai_compatible")
+        self.assertTrue(openrouter.requires_api_key)
+        api_route = get_llm_provider("api_route")
+        self.assertEqual(api_route.default_model, "gpt-5.4-mini")
+        self.assertEqual(api_route.default_base_url, "https://www.api-route.com/v1")
+        self.assertEqual(api_route.adapter, "openai_compatible")
+        self.assertTrue(api_route.requires_api_key)
         pollinations = get_llm_provider("pollinations")
         self.assertEqual(pollinations.default_model, "openai-fast")
         self.assertEqual(
@@ -299,6 +359,7 @@ class TestLiteLLMProvider(unittest.TestCase):
             [
                 "moonshot",
                 "openai",
+                "anthropic",
                 "gemini",
                 "deepseek",
                 "qwen",
@@ -308,12 +369,17 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "minimax",
                 "mimo",
                 "shengsuanyun",
+                "apimart",
                 "cloudflare",
                 "modelscope",
                 "aihubmix",
                 "aimlapi",
                 "evolink",
+                "openrouter",
+                "api_route",
+                "fluxionai",
                 "ollama",
+                "claude_code",
                 "oneapi",
                 "litellm",
                 "groq",
@@ -336,6 +402,31 @@ class TestLiteLLMProvider(unittest.TestCase):
         self.assertEqual(
             shengsuanyun.default_model,
             "deepseek/deepseek-v4-flash",
+        )
+        apimart = get_llm_provider("apimart")
+        self.assertEqual(
+            apimart.api_key_url,
+            "https://go.apimart.ai/gh-moneyprinterturbo",
+        )
+        self.assertEqual(apimart.default_model, "gpt-5.6-terra")
+        self.assertEqual(apimart.default_base_url, "https://api.apimart.ai/v1")
+        openrouter = get_llm_provider("openrouter")
+        self.assertEqual(
+            openrouter.api_key_url,
+            "https://openrouter.ai/settings/keys",
+        )
+        self.assertEqual(openrouter.default_model, "minimax/minimax-m3:free")
+        self.assertEqual(openrouter.default_base_url, "https://openrouter.ai/api/v1")
+        api_route = get_llm_provider("api_route")
+        self.assertEqual(
+            api_route.api_key_url,
+            "https://www.api-route.com",
+        )
+        self.assertEqual(api_route.default_model, "gpt-5.4-mini")
+        self.assertEqual(api_route.default_base_url, "https://www.api-route.com/v1")
+        self.assertEqual(
+            api_route.model_docs_url,
+            "https://www.api-route.com/pricing",
         )
 
     def test_provider_registry_uses_conventional_locale_and_config_keys(self):
@@ -405,7 +496,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                     model_docs_url=(
                         default_endpoint.model_docs_url
                         if default_endpoint
-                        else ""
+                        else provider.effective_model_docs_url()
                     ),
                     docker_hint="",
                     **{
@@ -466,7 +557,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                         model_docs_url=(
                             default_endpoint.model_docs_url
                             if default_endpoint
-                            else ""
+                            else provider.effective_model_docs_url()
                         ),
                         docker_hint="",
                         **{
@@ -665,7 +756,49 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "messages": [{"role": "user", "content": "Say hello"}],
             },
         )
-        self.assertEqual(result, "hellopollinations")
+        self.assertEqual(result, "hello\npollinations")
+
+    def test_anthropic_uses_openai_compatible_chat_completions(self):
+        """Claude 走 Anthropic 的 OpenAI 兼容端点，不需要额外适配器分支。"""
+        config.app.update(
+            {
+                "llm_provider": "anthropic",
+                "anthropic_api_key": "anthropic-test-key",
+                "anthropic_base_url": "",
+                "anthropic_model_name": "",
+            }
+        )
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                message = types.SimpleNamespace(content="hello\nclaude")
+                choice = types.SimpleNamespace(message=message)
+                return types.SimpleNamespace(choices=[choice])
+
+        fake_completions = FakeCompletions()
+        fake_client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=fake_completions)
+        )
+
+        with (
+            patch.object(llm, "OpenAI", return_value=fake_client) as openai_client,
+            patch.object(llm, "ChatCompletion", types.SimpleNamespace),
+        ):
+            result = llm._generate_response("Say hello")
+
+        openai_client.assert_called_once_with(
+            api_key="anthropic-test-key",
+            base_url="https://api.anthropic.com/v1/",
+        )
+        self.assertEqual(
+            fake_completions.kwargs,
+            {
+                "model": "claude-sonnet-5",
+                "messages": [{"role": "user", "content": "Say hello"}],
+            },
+        )
+        self.assertEqual(result, "hello\nclaude")
 
     def test_gemini_uses_google_genai_client(self):
         """Gemini 适配器应通过新版 SDK 的统一 Client 发起内容生成请求。"""
@@ -698,7 +831,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         with patch("google.genai.Client", FakeClient):
             result = llm._generate_response("Say hello")
 
-        self.assertEqual(result, "hellogemini")
+        self.assertEqual(result, "hello\ngemini")
         self.assertEqual(
             captured["client_kwargs"],
             {"api_key": "gemini-test-key", "http_options": None},
@@ -775,7 +908,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "messages": [{"role": "user", "content": "Say hello"}],
             },
         )
-        self.assertEqual(result, "gatewayresponse")
+        self.assertEqual(result, "gateway\nresponse")
 
     def _use_litellm_provider(self, model_name="openai/gpt-4o-mini"):
         config.app["llm_provider"] = "litellm"
@@ -808,7 +941,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         with patch.dict(sys.modules, {"litellm": fake_litellm}):
             result = llm._generate_response("Say hello")
 
-        self.assertEqual(result, "helloworld")
+        self.assertEqual(result, "hello\nworld")
 
     def test_litellm_provider_uses_registry_default_model(self):
         self._use_litellm_provider(model_name="")
@@ -887,7 +1020,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         """
         config.app["llm_provider"] = "groq"
         config.app["groq_api_key"] = "groq-key"
-        config.app["groq_model_name"] = "llama-3.3-70b-versatile"
+        config.app["groq_model_name"] = "openai/gpt-oss-120b"
         config.app["groq_base_url"] = (
             "https://myuser:mypassword@proxy.example.com/openai/v1"
         )
@@ -971,7 +1104,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         with self._patch_dashscope_generation(response):
             result = llm._generate_response("Say hello")
 
-        self.assertEqual(result, "你好世界")
+        self.assertEqual(result, "你好\n世界")
 
     def test_qwen_provider_falls_back_to_output_text(self):
         """保留旧 DashScope completion 响应结构的兼容路径。"""
@@ -981,7 +1114,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         with self._patch_dashscope_generation(response):
             result = llm._generate_response("Say hello")
 
-        self.assertEqual(result, "旧格式响应")
+        self.assertEqual(result, "旧格式\n响应")
 
     def test_qwen_provider_reports_empty_text(self):
         """Qwen 空响应应返回可诊断错误，而不是底层 AttributeError。"""
@@ -1008,6 +1141,48 @@ class TestLiteLLMProvider(unittest.TestCase):
         self.assertIn("Error:", result)
         self.assertIn("returned empty choices", result)
         self.assertNotIn("NoneType", result)
+
+    def test_apimart_provider_uses_unwrapped_openai_compatible_endpoint(self):
+        """
+        APIMart 文档同时展示 `/api/v1` 和 `/v1` 两组入口。前者的示例响应
+        带有 code/data 外层包装，OpenAI SDK 无法直接从顶层读取 choices；
+        LLM Provider 必须使用标准 `/v1` 地址，才能复用现有响应解析链路。
+        """
+        config.app["llm_provider"] = "apimart"
+        config.app["apimart_api_key"] = "apimart-key"
+        config.app["apimart_base_url"] = ""
+        config.app["apimart_model_name"] = ""
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                message = types.SimpleNamespace(content="hello\napimart")
+                choice = types.SimpleNamespace(message=message)
+                return types.SimpleNamespace(choices=[choice])
+
+        fake_completions = FakeCompletions()
+        fake_client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=fake_completions)
+        )
+
+        with (
+            patch.object(llm, "OpenAI", return_value=fake_client) as openai_client,
+            patch.object(llm, "ChatCompletion", types.SimpleNamespace),
+        ):
+            result = llm._generate_response("Say hello")
+
+        openai_client.assert_called_once_with(
+            api_key="apimart-key",
+            base_url="https://api.apimart.ai/v1",
+        )
+        self.assertEqual(
+            fake_completions.kwargs,
+            {
+                "model": "gpt-5.6-terra",
+                "messages": [{"role": "user", "content": "Say hello"}],
+            },
+        )
+        self.assertEqual(result, "hello\napimart")
 
     def test_aihubmix_provider_uses_openai_compatible_client(self):
         """
@@ -1049,7 +1224,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "messages": [{"role": "user", "content": "Say hello"}],
             },
         )
-        self.assertEqual(result, "helloaihubmix")
+        self.assertEqual(result, "hello\naihubmix")
 
     def test_aimlapi_provider_uses_openai_compatible_client(self):
         config.app["llm_provider"] = "aimlapi"
@@ -1086,7 +1261,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "messages": [{"role": "user", "content": "Say hello"}],
             },
         )
-        self.assertEqual(result, "helloaimlapi")
+        self.assertEqual(result, "hello\naimlapi")
 
     def test_evolink_provider_uses_openai_compatible_client(self):
         """
@@ -1128,7 +1303,90 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "messages": [{"role": "user", "content": "Say hello"}],
             },
         )
-        self.assertEqual(result, "helloevolink")
+        self.assertEqual(result, "hello\nevolink")
+
+    def test_openrouter_provider_uses_openai_compatible_client(self):
+        """
+        OpenRouter exposes OpenAI-compatible Chat Completions through one
+        unified endpoint. The default model stays on a currently free text model
+        suitable for script and keyword generation.
+        """
+        config.app["llm_provider"] = "openrouter"
+        config.app["openrouter_api_key"] = "openrouter-key"
+        config.app["openrouter_base_url"] = ""
+        config.app["openrouter_model_name"] = ""
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                message = types.SimpleNamespace(content="hello\nopenrouter")
+                choice = types.SimpleNamespace(message=message)
+                return types.SimpleNamespace(choices=[choice])
+
+        fake_completions = FakeCompletions()
+        fake_client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=fake_completions)
+        )
+
+        with (
+            patch.object(llm, "OpenAI", return_value=fake_client) as openai_client,
+            patch.object(llm, "ChatCompletion", types.SimpleNamespace),
+        ):
+            result = llm._generate_response("Say hello")
+
+        openai_client.assert_called_once_with(
+            api_key="openrouter-key",
+            base_url="https://openrouter.ai/api/v1",
+        )
+        self.assertEqual(
+            fake_completions.kwargs,
+            {
+                "model": "minimax/minimax-m3:free",
+                "messages": [{"role": "user", "content": "Say hello"}],
+            },
+        )
+        self.assertEqual(result, "hello\nopenrouter")
+
+    def test_api_route_provider_uses_openai_compatible_client(self):
+        """
+        API Route exposes OpenAI-compatible Chat Completions through one
+        unified endpoint with intelligent routing and high availability.
+        """
+        config.app["llm_provider"] = "api_route"
+        config.app["api_route_api_key"] = "api-route-key"
+        config.app["api_route_base_url"] = ""
+        config.app["api_route_model_name"] = ""
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                message = types.SimpleNamespace(content="hello\napi_route")
+                choice = types.SimpleNamespace(message=message)
+                return types.SimpleNamespace(choices=[choice])
+
+        fake_completions = FakeCompletions()
+        fake_client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=fake_completions)
+        )
+
+        with (
+            patch.object(llm, "OpenAI", return_value=fake_client) as openai_client,
+            patch.object(llm, "ChatCompletion", types.SimpleNamespace),
+        ):
+            result = llm._generate_response("Say hello")
+
+        openai_client.assert_called_once_with(
+            api_key="api-route-key",
+            base_url="https://www.api-route.com/v1",
+        )
+        self.assertEqual(
+            fake_completions.kwargs,
+            {
+                "model": "gpt-5.4-mini",
+                "messages": [{"role": "user", "content": "Say hello"}],
+            },
+        )
+        self.assertEqual(result, "hello\napi_route")
 
     def test_volcengine_provider_uses_openai_compatible_client(self):
         """
@@ -1170,7 +1428,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "messages": [{"role": "user", "content": "Say hello"}],
             },
         )
-        self.assertEqual(result, "hellovolcengine")
+        self.assertEqual(result, "hello\nvolcengine")
 
     def test_grok_provider_still_uses_existing_path(self):
         config.app["llm_provider"] = "grok"
@@ -1188,7 +1446,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         config.app["llm_provider"] = "groq"
         config.app["groq_api_key"] = ""
         config.app["groq_base_url"] = "https://api.groq.com/openai/v1"
-        config.app["groq_model_name"] = "llama-3.3-70b-versatile"
+        config.app["groq_model_name"] = "openai/gpt-oss-120b"
 
         result = llm._generate_response("test")
 
@@ -1200,7 +1458,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         config.app["llm_provider"] = "groq"
         config.app["groq_api_key"] = "groq-test-key"
         config.app["groq_base_url"] = ""
-        config.app["groq_model_name"] = "llama-3.3-70b-versatile"
+        config.app["groq_model_name"] = "openai/gpt-oss-120b"
 
         fake_response = types.SimpleNamespace(
             choices=[
@@ -1225,7 +1483,7 @@ class TestLiteLLMProvider(unittest.TestCase):
             api_key="groq-test-key",
             base_url="https://api.groq.com/openai/v1",
         )
-        self.assertEqual(result, "hellogroq")
+        self.assertEqual(result, "hello\ngroq")
 
     def _use_ollama_provider(self, base_url=""):
         config.app["llm_provider"] = "ollama"
@@ -1263,7 +1521,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "messages": [{"role": "user", "content": "Say hello"}],
             },
         )
-        self.assertEqual(result, "helloollama")
+        self.assertEqual(result, "hello\nollama")
 
     def test_ollama_default_base_url_uses_localhost_outside_container(self):
         """
@@ -1352,7 +1610,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "messages": [{"role": "user", "content": "Say hello"}],
             },
         )
-        self.assertEqual(result, "hellomimo")
+        self.assertEqual(result, "hello\nmimo")
 
     def test_azure_provider_uses_azure_client_directly(self):
         """
@@ -1398,7 +1656,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "messages": [{"role": "user", "content": "Say hello"}],
             },
         )
-        self.assertEqual(result, "helloazure")
+        self.assertEqual(result, "hello\nazure")
 
     def test_unsupported_provider_returns_clear_error(self):
         config.app["llm_provider"] = "g" + "4f"
@@ -1407,6 +1665,377 @@ class TestLiteLLMProvider(unittest.TestCase):
 
         self.assertIn("Error:", result)
         self.assertIn("unsupported llm provider", result)
+
+
+class TestClaudeCodeProvider(unittest.TestCase):
+    """claude_code Provider 通过本机 claude CLI 调用订阅账号，不走 HTTP API。"""
+
+    def setUp(self):
+        self.original_app_config = dict(config.app)
+        config.app["llm_provider"] = "claude_code"
+        config.app["claude_code_model_name"] = ""
+        config.app["claude_code_cli_path"] = ""
+        config.app["claude_code_timeout"] = ""
+
+    def tearDown(self):
+        config.app.clear()
+        config.app.update(self.original_app_config)
+
+    @staticmethod
+    def _completed(stdout="", stderr="", returncode=0):
+        return types.SimpleNamespace(
+            stdout=stdout, stderr=stderr, returncode=returncode
+        )
+
+    @staticmethod
+    def _cli_payload(result, is_error=False):
+        return json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": is_error,
+                "result": result,
+            }
+        )
+
+    # ------------------------------------------------------------- success
+    def test_successful_generation_returns_cli_result_text(self):
+        """CLI 返回的 JSON 中只有 result 是正文，其余字段不应泄漏到脚本里。"""
+        with (
+            patch.object(llm.shutil, "which", return_value="/usr/bin/claude"),
+            patch.object(
+                llm.subprocess,
+                "run",
+                return_value=self._completed(stdout=self._cli_payload("Hello world")),
+            ) as run,
+        ):
+            self.assertEqual(llm._generate_response("write something"), "Hello world")
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], "/usr/bin/claude")
+        self.assertIn("-p", command)
+        self.assertEqual(
+            run.call_args.kwargs["timeout"], llm.CLAUDE_CODE_DEFAULT_TIMEOUT
+        )
+
+    def test_generation_disables_tools_and_user_customizations(self):
+        """纯文本生成必须关闭全部工具和用户级定制，避免读写文件或加载 skills。"""
+        with (
+            patch.object(llm.shutil, "which", return_value="/usr/bin/claude"),
+            patch.object(
+                llm.subprocess,
+                "run",
+                return_value=self._completed(stdout=self._cli_payload("ok")),
+            ) as run,
+        ):
+            llm._generate_response("write something")
+
+        command = run.call_args.args[0]
+        self.assertIn("--tools", command)
+        self.assertEqual(command[command.index("--tools") + 1], "")
+        self.assertIn("--safe-mode", command)
+        self.assertIn("--system-prompt", command)
+        self.assertEqual(
+            command[command.index("--system-prompt") + 1],
+            llm.CLAUDE_CODE_SYSTEM_PROMPT,
+        )
+
+    def test_model_name_is_only_passed_when_configured(self):
+        """模型名留空时应沿用 CLI 默认模型，而不是硬编码一个可能失效的 ID。"""
+        with (
+            patch.object(llm.shutil, "which", return_value="/usr/bin/claude"),
+            patch.object(
+                llm.subprocess,
+                "run",
+                return_value=self._completed(stdout=self._cli_payload("ok")),
+            ) as run,
+        ):
+            llm._generate_response("write something")
+            self.assertNotIn("--model", run.call_args.args[0])
+
+            config.app["claude_code_model_name"] = "claude-opus-5"
+            llm._generate_response("write something")
+            command = run.call_args.args[0]
+            self.assertEqual(command[command.index("--model") + 1], "claude-opus-5")
+
+    # ------------------------------------------------- credential isolation
+    def test_conflicting_credentials_are_removed_from_subprocess_env(self):
+        """环境里的 API Key 会让 CLI 绕过订阅登录并产生 API 计费，必须剔除。"""
+        polluted = {
+            "PATH": "/usr/bin",
+            "ANTHROPIC_API_KEY": "sk-ant-api03-should-not-be-used",
+            "ANTHROPIC_BASE_URL": "https://proxy.example.com",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-subscription",
+        }
+        env, removed = llm.build_claude_code_env(polluted)
+
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("ANTHROPIC_BASE_URL", env)
+        self.assertNotIn("CLAUDE_CODE_USE_BEDROCK", env)
+        # 订阅令牌是容器内唯一的鉴权方式，必须保留。
+        self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "sk-ant-oat01-subscription")
+        self.assertEqual(env["PATH"], "/usr/bin")
+        self.assertCountEqual(
+            removed,
+            ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK"],
+        )
+
+    def test_every_cloud_provider_switch_is_removed(self):
+        """Bedrock / Vertex / Foundry / Mantle / Gateway 等开关都会改走云厂商计费。"""
+        switches = {
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "CLAUDE_CODE_USE_VERTEX": "1",
+            "CLAUDE_CODE_USE_FOUNDRY": "1",
+            "CLAUDE_CODE_USE_MANTLE": "1",
+            "CLAUDE_CODE_USE_GATEWAY": "1",
+            "CLAUDE_CODE_USE_ANTHROPIC_AWS": "1",
+            "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD": "1",
+        }
+        env, removed = llm.build_claude_code_env({"PATH": "/usr/bin", **switches})
+
+        self.assertEqual(env, {"PATH": "/usr/bin"})
+        self.assertCountEqual(removed, list(switches))
+
+    def test_foundry_credentials_are_removed(self):
+        """Foundry 凭证会让 CLI 走 Azure 计费，凭证和开关都必须剔除。"""
+        foundry = {
+            "CLAUDE_CODE_USE_FOUNDRY": "1",
+            "ANTHROPIC_FOUNDRY_API_KEY": "foundry-key",
+            "ANTHROPIC_FOUNDRY_AUTH_TOKEN": "foundry-token",
+            "ANTHROPIC_FOUNDRY_BASE_URL": "https://example.openai.azure.com",
+            "ANTHROPIC_FOUNDRY_RESOURCE": "my-resource",
+            "CLAUDE_CODE_SKIP_FOUNDRY_AUTH": "1",
+        }
+        env, removed = llm.build_claude_code_env(
+            {"PATH": "/usr/bin", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01", **foundry}
+        )
+
+        for name in foundry:
+            self.assertNotIn(name, env, name)
+        self.assertCountEqual(removed, list(foundry))
+        self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "sk-ant-oat01")
+
+    def test_auth_bypass_switches_are_removed(self):
+        """CLAUDE_CODE_SKIP_*_AUTH 会跳过供应商鉴权，同样不能带进子进程。"""
+        bypasses = {
+            "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1",
+            "CLAUDE_CODE_SKIP_VERTEX_AUTH": "1",
+            "CLAUDE_CODE_SKIP_MANTLE_AUTH": "1",
+            "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH": "1",
+        }
+        env, removed = llm.build_claude_code_env({"PATH": "/usr/bin", **bypasses})
+        self.assertEqual(env, {"PATH": "/usr/bin"})
+        self.assertCountEqual(removed, list(bypasses))
+
+    def test_credential_location_variables_are_preserved(self):
+        """*_CONFIG_DIR 只指明凭证位置，剔除反而会让已登录的订阅失效。"""
+        preserved = {
+            "ANTHROPIC_CONFIG_DIR": "/home/user/.config/anthropic",
+            "CLAUDE_CONFIG_DIR": "/home/user/.claude",
+            "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01",
+        }
+        env, removed = llm.build_claude_code_env(dict(preserved))
+        self.assertEqual(env, preserved)
+        self.assertEqual(removed, [])
+
+    def test_unrelated_variables_are_never_removed(self):
+        """过滤只针对鉴权和供应商开关，不应影响 PATH、代理等常规变量。"""
+        env, removed = llm.build_claude_code_env(
+            {"PATH": "/usr/bin", "HTTPS_PROXY": "http://proxy:3128", "HOME": "/root"}
+        )
+        self.assertEqual(
+            env,
+            {"PATH": "/usr/bin", "HTTPS_PROXY": "http://proxy:3128", "HOME": "/root"},
+        )
+        self.assertEqual(removed, [])
+
+    def test_clean_environment_is_left_unchanged(self):
+        env, removed = llm.build_claude_code_env({"PATH": "/usr/bin"})
+        self.assertEqual(env, {"PATH": "/usr/bin"})
+        self.assertEqual(removed, [])
+
+    def test_subprocess_receives_sanitized_environment(self):
+        """适配器必须真的把清理后的环境传给子进程，而不只是计算一遍。"""
+        with (
+            patch.object(llm.shutil, "which", return_value="/usr/bin/claude"),
+            patch.dict(
+                os.environ, {"ANTHROPIC_API_KEY": "sk-ant-api03-x"}, clear=False
+            ),
+            patch.object(
+                llm.subprocess,
+                "run",
+                return_value=self._completed(stdout=self._cli_payload("ok")),
+            ) as run,
+        ):
+            llm._generate_response("write something")
+
+        self.assertNotIn("ANTHROPIC_API_KEY", run.call_args.kwargs["env"])
+
+    # ------------------------------------------------------- timeout config
+    def test_timeout_accepts_numeric_and_string_values(self):
+        """TOML 里 300 是 int，"300" 是 str，两种写法都必须支持。"""
+        self.assertEqual(llm.coerce_claude_code_timeout(300), 300.0)
+        self.assertEqual(llm.coerce_claude_code_timeout(300.5), 300.5)
+        self.assertEqual(llm.coerce_claude_code_timeout("300"), 300.0)
+        self.assertEqual(llm.coerce_claude_code_timeout("  300  "), 300.0)
+        self.assertEqual(
+            llm.coerce_claude_code_timeout(""), llm.CLAUDE_CODE_DEFAULT_TIMEOUT
+        )
+        self.assertEqual(
+            llm.coerce_claude_code_timeout(None), llm.CLAUDE_CODE_DEFAULT_TIMEOUT
+        )
+
+    def test_timeout_rejects_non_finite_and_invalid_values(self):
+        """nan / inf 会让 subprocess 永久阻塞，必须在配置阶段就拒绝。"""
+        for invalid in (
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            "nan",
+            "inf",
+            "-inf",
+            0,
+            -5,
+            "abc",
+            True,
+            [300],
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    llm.coerce_claude_code_timeout(invalid)
+
+    def test_integer_timeout_in_config_is_accepted(self):
+        """回归测试：int 超时曾触发 'int' object has no attribute 'strip'。"""
+        config.app["claude_code_timeout"] = 30
+        with (
+            patch.object(llm.shutil, "which", return_value="/usr/bin/claude"),
+            patch.object(
+                llm.subprocess,
+                "run",
+                return_value=self._completed(stdout=self._cli_payload("ok")),
+            ) as run,
+        ):
+            self.assertEqual(llm._generate_response("write something"), "ok")
+        self.assertEqual(run.call_args.kwargs["timeout"], 30.0)
+
+    def test_zero_and_false_timeouts_are_rejected_not_defaulted(self):
+        """0 / false 是无效取值，必须报错，而不是被默认值悄悄替换成 300 秒。"""
+        for invalid in (0, False, "0", 0.0):
+            with self.subTest(invalid=invalid):
+                config.app["claude_code_timeout"] = invalid
+                with patch.object(llm.shutil, "which", return_value="/usr/bin/claude"):
+                    response = llm._generate_response("write something")
+                self.assertTrue(response.startswith("Error:"), response)
+                self.assertIn("claude_code_timeout", response)
+
+    def test_field_default_applies_only_to_empty_values(self):
+        """Registry 默认值只在未配置时生效，合法的假值要原样进入校验。"""
+        self.assertEqual(llm._resolve_provider_field_value(None, "300"), "300")
+        self.assertEqual(llm._resolve_provider_field_value("", "300"), "300")
+        self.assertEqual(llm._resolve_provider_field_value("   ", "300"), "300")
+        self.assertEqual(llm._resolve_provider_field_value(0, "300"), 0)
+        self.assertEqual(llm._resolve_provider_field_value(False, "300"), False)
+        self.assertEqual(llm._resolve_provider_field_value("60", "300"), "60")
+
+    def test_invalid_timeout_reports_configuration_error(self):
+        config.app["claude_code_timeout"] = "soon"
+        with patch.object(llm.shutil, "which", return_value="/usr/bin/claude"):
+            response = llm._generate_response("write something")
+        self.assertIn("claude_code_timeout", response)
+        self.assertTrue(response.startswith("Error:"), response)
+
+    # -------------------------------------------------------- failure modes
+    def test_missing_cli_reports_actionable_error(self):
+        with (
+            patch.object(llm.shutil, "which", return_value=None),
+            patch.object(llm.os.path, "isfile", return_value=False),
+        ):
+            response = llm._generate_response("write something")
+        self.assertIn("claude CLI not found", response)
+
+    def test_missing_login_reports_setup_token_hint(self):
+        """容器内无法执行交互式 /login，错误提示必须给出可用的替代方式。"""
+        payload = self._cli_payload("Not logged in · Please run /login", is_error=True)
+        with (
+            patch.object(llm.shutil, "which", return_value="/usr/bin/claude"),
+            patch.object(
+                llm.subprocess,
+                "run",
+                return_value=self._completed(stdout=payload, returncode=1),
+            ),
+        ):
+            response = llm._generate_response("write something")
+        self.assertIn("Not logged in", response)
+        self.assertIn("setup-token", response)
+        self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", response)
+
+    def test_exhausted_quota_surfaces_cli_message(self):
+        """用量耗尽同样是 is_error + 非零退出码，需要原样透出可读原因。"""
+        payload = self._cli_payload(
+            "Claude usage limit reached. Your limit will reset at 5pm.", is_error=True
+        )
+        with (
+            patch.object(llm.shutil, "which", return_value="/usr/bin/claude"),
+            patch.object(
+                llm.subprocess,
+                "run",
+                return_value=self._completed(stdout=payload, returncode=1),
+            ),
+        ):
+            response = llm._generate_response("write something")
+        self.assertIn("usage limit reached", response)
+
+    def test_timeout_is_reported_with_configured_seconds(self):
+        config.app["claude_code_timeout"] = 12
+        with (
+            patch.object(llm.shutil, "which", return_value="/usr/bin/claude"),
+            patch.object(
+                llm.subprocess,
+                "run",
+                side_effect=llm.subprocess.TimeoutExpired(cmd="claude", timeout=12),
+            ),
+        ):
+            response = llm._generate_response("write something")
+        self.assertIn("timed out after 12s", response)
+
+    def test_malformed_output_is_reported_instead_of_crashing(self):
+        with (
+            patch.object(llm.shutil, "which", return_value="/usr/bin/claude"),
+            patch.object(
+                llm.subprocess,
+                "run",
+                return_value=self._completed(stdout="not json at all"),
+            ),
+        ):
+            response = llm._generate_response("write something")
+        self.assertIn("invalid response", response)
+
+    def test_empty_output_is_reported(self):
+        with (
+            patch.object(llm.shutil, "which", return_value="/usr/bin/claude"),
+            patch.object(
+                llm.subprocess, "run", return_value=self._completed(stdout="   ")
+            ),
+        ):
+            response = llm._generate_response("write something")
+        self.assertTrue(response.startswith("Error:"), response)
+
+    def test_unsupported_cli_version_reports_upgrade_hint(self):
+        """旧版 CLI 没有 --tools / --safe-mode，应提示升级而不是丢出裸 stderr。"""
+        with (
+            patch.object(llm.shutil, "which", return_value="/usr/bin/claude"),
+            patch.object(
+                llm.subprocess,
+                "run",
+                return_value=self._completed(
+                    stderr="error: unknown option '--safe-mode'", returncode=1
+                ),
+            ),
+        ):
+            response = llm._generate_response("write something")
+        self.assertIn("upgrade", response.lower())
+        self.assertIn(llm.CLAUDE_CODE_MIN_CLI_VERSION, response)
 
 
 class TestRuntimeEnvironmentDetection(unittest.TestCase):
@@ -1705,6 +2334,54 @@ class TestGenerateImagePrompt(unittest.TestCase):
             result = llm.generate_image_prompt("golden retriever beach")
 
         self.assertEqual(result, "golden retriever beach")
+
+
+class TestRetryWarningBoundary(unittest.TestCase):
+    """'trying again' must not be logged on the last retry attempt."""
+
+    def _trying_again_count(self, mock_logger: object, fragment: str) -> int:
+        return sum(
+            1 for call in mock_logger.warning.call_args_list if fragment in str(call)
+        )
+
+    def test_generate_script_no_spurious_warning_on_last_attempt(self):
+        with (
+            patch.object(
+                llm,
+                "_generate_response",
+                side_effect=RuntimeError("provider unavailable"),
+            ),
+            patch.object(llm, "logger") as mock_logger,
+        ):
+            llm.generate_script(video_subject="test subject")
+
+        count = self._trying_again_count(mock_logger, "trying again")
+        self.assertEqual(
+            count,
+            llm._max_retries - 1,
+            "Warning must not fire on the final attempt — no further retry will occur",
+        )
+
+    def test_generate_terms_no_spurious_warning_on_last_attempt(self):
+        with (
+            patch.object(
+                llm,
+                "_generate_response",
+                side_effect=RuntimeError("provider unavailable"),
+            ),
+            patch.object(llm, "logger") as mock_logger,
+        ):
+            llm.generate_terms(
+                video_subject="test subject",
+                video_script="some script text",
+            )
+
+        count = self._trying_again_count(mock_logger, "trying again")
+        self.assertEqual(
+            count,
+            llm._max_retries - 1,
+            "Warning must not fire on the final attempt — no further retry will occur",
+        )
 
 
 if __name__ == "__main__":

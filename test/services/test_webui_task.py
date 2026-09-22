@@ -33,6 +33,14 @@ def _attribute_name(node):
     return ".".join(reversed(names))
 
 
+def _log_record(file_path, message="generation finished"):
+    """构造 ``format_log_record`` 需要的最小 loguru 记录。"""
+    return {
+        "file": SimpleNamespace(name=os.path.basename(file_path), path=file_path),
+        "message": message,
+    }
+
+
 def test_generation_controls_submit_background_task_instead_of_blocking_page():
     """
     WebUI 生成按钮不能重新直接调用同步流水线。
@@ -148,6 +156,7 @@ def test_completed_task_renders_subject_named_video_download(
     selected_nodes = []
     target_names = {
         "_DOWNLOAD_FILENAME_INVALID_PATTERN",
+        "_WINDOWS_RESERVED_FILENAMES",
         "_build_video_download_name",
         "_normalize_task_state",
         "_render_generation_task_snapshot",
@@ -173,6 +182,7 @@ def test_completed_task_renders_subject_named_video_download(
             self.session_state = {}
             self.downloads = []
             self.videos = []
+            self.warnings = []
 
         def columns(self, count):
             return [FakeColumn() for _ in range(count)]
@@ -186,8 +196,8 @@ def test_completed_task_renders_subject_named_video_download(
         def success(self, _message):
             pass
 
-        def warning(self, _message):
-            pass
+        def warning(self, message):
+            self.warnings.append(message)
 
         def error(self, _message):
             pass
@@ -206,7 +216,10 @@ def test_completed_task_renders_subject_named_video_download(
         "os": os,
         "re": re,
         "st": fake_st,
-        "tr": lambda key: key,
+        "tr": lambda key: (
+            "Video {index} reused {count} source clips."
+            if key == "Batch Material Reuse Warning" else key
+        ),
         "_render_generation_logs": lambda _task_id: None,
     }
     module = ast.fix_missing_locations(ast.Module(body=selected_nodes, type_ignores=[]))
@@ -218,12 +231,15 @@ def test_completed_task_renders_subject_named_video_download(
             "state": const.TASK_STATE_COMPLETE,
             "progress": 100,
             "videos": [str(video_path)],
-            "warnings": [],
+            "warnings": [
+                {"code": "batch_materials_reused", "video_index": 2, "count": 3}
+            ],
             "video_subject": "A day: in / Shanghai?",
         },
     )
 
     assert fake_st.videos == [str(video_path)]
+    assert fake_st.warnings == ["Video 2 reused 3 source clips."]
     assert fake_st.downloads == [
         (
             "Download Video",
@@ -293,6 +309,36 @@ def test_submit_generation_copies_params_before_starting_worker():
     webui_task.sm.state.delete_task("copied-params-test")
 
 
+def test_submit_generation_keeps_voxcpm_reference_audio_out_of_params():
+    """参考音频仅属于内存中的当前请求，不能进入可持久化任务参数。"""
+    params = VideoParams(video_subject="task isolation")
+    reference_audio = b"bounded-reference-wav"
+    prompt_audio = b"bounded-prompt-wav"
+    prompt_text = "delivery transcript"
+    with patch.object(webui_task._task_manager, "add_task") as add_task:
+        webui_task.submit_generation(
+            "reference-audio-isolation",
+            params,
+            capture_logs=False,
+            voxcpm_reference_audio=reference_audio,
+            voxcpm_prompt_audio=prompt_audio,
+            voxcpm_prompt_text=prompt_text,
+        )
+
+    submitted_params = add_task.call_args.kwargs["params"]
+    serialized_params = submitted_params.model_dump_json()
+    assert "voxcpm_reference_audio" not in serialized_params
+    assert "voxcpm_prompt_audio" not in serialized_params
+    assert "voxcpm_prompt_text" not in serialized_params
+    assert reference_audio.decode("ascii") not in serialized_params
+    assert prompt_audio.decode("ascii") not in serialized_params
+    assert prompt_text not in serialized_params
+    assert add_task.call_args.kwargs["voxcpm_reference_audio"] == reference_audio
+    assert add_task.call_args.kwargs["voxcpm_prompt_audio"] == prompt_audio
+    assert add_task.call_args.kwargs["voxcpm_prompt_text"] == prompt_text
+    webui_task.sm.state.delete_task("reference-audio-isolation")
+
+
 def test_scheduling_failure_is_saved_as_terminal_task_state():
     """队列或线程启动失败时不能让任务管理器永久停留在“生成中”。"""
     task_id = "scheduling-failure-test"
@@ -345,6 +391,85 @@ def test_worker_logs_are_available_without_streamlit_session_state():
         r"- unique background task log",
         records[0],
     )
+
+
+def test_webui_worker_forwards_reference_audio_to_pipeline():
+    reference_audio = b"task-local-reference-wav"
+    prompt_audio = b"task-local-prompt-wav"
+    prompt_text = "task-local transcript"
+    with (
+        patch.object(webui_task.tm, "start", return_value={"videos": []}) as start,
+        patch.object(
+            webui_task.config,
+            "runtime_config_lock",
+            return_value=nullcontext(),
+        ),
+    ):
+        webui_task._run_generation(
+            "reference-audio-forwarding",
+            VideoParams(video_subject="reference forwarding"),
+            capture_logs=False,
+            voxcpm_reference_audio=reference_audio,
+            voxcpm_prompt_audio=prompt_audio,
+            voxcpm_prompt_text=prompt_text,
+        )
+
+    assert start.call_args.kwargs["voxcpm_reference_audio"] == reference_audio
+    assert start.call_args.kwargs["voxcpm_prompt_audio"] == prompt_audio
+    assert start.call_args.kwargs["voxcpm_prompt_text"] == prompt_text
+
+
+def test_log_paths_stay_posix_style_on_every_platform():
+    """
+    调用位置必须始终显示为 ``./app/services/task.py``。
+
+    Windows 的 ``os.path.relpath`` 返回反斜杠分隔的路径，直接拼接会输出
+    ``./app\\services\\task.py``，同一份日志在不同系统上格式不一致，也无法
+    和上面按正斜杠断言的后台日志回归测试对齐。
+    """
+    record = _log_record(
+        os.path.join(logging_utils.PROJECT_ROOT, "app", "services", "task.py")
+    )
+
+    logging_utils.format_log_record(record)
+
+    assert record["file"].path == "./app/services/task.py"
+
+
+def test_log_paths_on_another_mount_do_not_discard_the_record():
+    """
+    映射盘或 ``subst`` 盘启动时不能让整条日志消失。
+
+    这种部署下调用栈里的路径仍在 ``X:``，而 ``PROJECT_ROOT`` 已被 realpath
+    解析回 ``C:``，``os.path.relpath`` 会抛出 ``ValueError``。loguru 捕获
+    格式化异常后会丢弃记录，终端和 WebUI 日志面板会同时变空。
+    """
+    absolute_path = os.path.join(
+        logging_utils.PROJECT_ROOT, "app", "services", "task.py"
+    )
+    record = _log_record(absolute_path)
+
+    with patch.object(
+        logging_utils.os.path,
+        "relpath",
+        side_effect=ValueError("path is on mount 'X:', start on mount 'C:'"),
+    ):
+        log_format = logging_utils.format_log_record(record)
+
+    assert log_format == logging_utils.LOG_RECORD_FORMAT
+    assert record["file"].path == absolute_path
+
+
+def test_log_paths_outside_the_project_keep_the_absolute_path():
+    """项目目录之外的文件保持绝对路径，避免输出 ``./../..`` 这类回溯路径。"""
+    outside_path = os.path.join(
+        os.path.dirname(logging_utils.PROJECT_ROOT), "site-packages", "worker.py"
+    )
+    record = _log_record(outside_path)
+
+    logging_utils.format_log_record(record)
+
+    assert record["file"].path == outside_path
 
 
 def test_generation_log_fragment_refreshes_within_half_a_second():

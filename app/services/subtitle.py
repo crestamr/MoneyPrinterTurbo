@@ -1,6 +1,7 @@
 import json
 import os.path
 import re
+import tempfile
 from timeit import default_timer as timer
 
 try:
@@ -19,7 +20,12 @@ initial_prompt = config.whisper.get("initial_prompt", "") or None
 model = None
 
 
-def create(audio_file, subtitle_file: str = ""):
+def create(
+    audio_file,
+    subtitle_file: str = "",
+    word_level: bool = False,
+    log_details: bool = True,
+):
     global model
     if WhisperModel is None:
         logger.warning("faster_whisper not available, skipping whisper subtitle generation")
@@ -48,7 +54,8 @@ def create(audio_file, subtitle_file: str = ""):
             )
             return None
 
-    logger.info(f"start, output file: {subtitle_file}")
+    if log_details:
+        logger.info(f"start, output file: {subtitle_file}")
     if not subtitle_file:
         subtitle_file = f"{audio_file}.srt"
 
@@ -73,14 +80,22 @@ def create(audio_file, subtitle_file: str = ""):
         if not seg_text:
             return
 
-        msg = "[%.2fs -> %.2fs] %s" % (seg_start, seg_end, seg_text)
-        logger.debug(msg)
+        if log_details:
+            msg = "[%.2fs -> %.2fs] %s" % (seg_start, seg_end, seg_text)
+            logger.debug(msg)
 
         subtitles.append(
             {"msg": seg_text, "start_time": seg_start, "end_time": seg_end}
         )
 
     for segment in segments:
+        if word_level and segment.words:
+            for word in segment.words:
+                cleaned_word = word.word.strip()
+                if cleaned_word:
+                    recognized(cleaned_word, word.start, word.end)
+            continue
+
         words_idx = 0
         words_len = len(segment.words)
 
@@ -141,7 +156,8 @@ def create(audio_file, subtitle_file: str = ""):
     sub = "\n".join(lines) + "\n"
     with open(subtitle_file, "w", encoding="utf-8") as f:
         f.write(sub)
-    logger.info(f"subtitle file created: {subtitle_file}")
+    if log_details:
+        logger.info(f"subtitle file created: {subtitle_file}")
 
 
 def file_to_subtitles(filename):
@@ -155,7 +171,9 @@ def file_to_subtitles(filename):
     with open(filename, "r", encoding="utf-8") as f:
         for line in f:
             times = re.findall("([0-9]*:[0-9]*:[0-9]*,[0-9]*)", line)
-            if times:
+            # Once a cue has started, timestamps belong to its text until the
+            # blank-line separator; they must not overwrite the cue's timing.
+            if times and current_times is None:
                 current_times = line
             elif line.strip() == "" and current_times:
                 index += 1
@@ -171,6 +189,24 @@ def file_to_subtitles(filename):
         index += 1
         times_texts.append((index, current_times.strip(), current_text.strip()))
     return times_texts
+
+
+def transcribe_audio_bytes(audio_bytes: bytes) -> str:
+    """Transcribe in-memory WAV audio and remove every temporary artifact."""
+    if not isinstance(audio_bytes, bytes) or not audio_bytes:
+        return ""
+
+    with tempfile.TemporaryDirectory(prefix="whisper-transcript-") as temp_dir:
+        audio_file = os.path.join(temp_dir, "reference.wav")
+        subtitle_file = os.path.join(temp_dir, "reference.srt")
+        with open(audio_file, "wb") as output:
+            output.write(audio_bytes)
+
+        create_result = create(audio_file, subtitle_file, log_details=False)
+        if create_result in (None, "") and not os.path.isfile(subtitle_file):
+            return ""
+        subtitle_items = file_to_subtitles(subtitle_file)
+        return " ".join(item[2].strip() for item in subtitle_items if item[2].strip())
 
 
 def levenshtein_distance(s1, s2):
