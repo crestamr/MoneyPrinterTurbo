@@ -462,6 +462,38 @@ class TestMiniMaxPollTask(unittest.TestCase):
                 )
 
 
+class TestMiniMaxDownloadToCache(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.patched_storage_dir = patch(
+            "app.services.minimax_video.utils.storage_dir",
+            return_value=self.temp_dir,
+        )
+        self.patched_storage_dir.start()
+
+    def tearDown(self):
+        self.patched_storage_dir.stop()
+
+    def test_download_to_cache_raises_on_non_200_and_leaves_no_file(self):
+        fake_response = SimpleNamespace(
+            status_code=403,
+            text="expired signature",
+            content=b"<html>Forbidden</html>",
+        )
+        with patch(
+            "app.services.minimax_video.requests.get",
+            return_value=fake_response,
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError) as ctx:
+                minimax_video._download_to_cache(
+                    "https://cdn.example.com/expired.mp4", "task-expired"
+                )
+
+        self.assertEqual(ctx.exception.status_code, 403)
+        destination = os.path.join(self.temp_dir, "minimax-task-expired.mp4")
+        self.assertFalse(os.path.exists(destination))
+
+
 class TestMiniMaxGenerateVideos(unittest.TestCase):
     def setUp(self):
         self.original_app_config = dict(config.app)
@@ -499,7 +531,9 @@ class TestMiniMaxGenerateVideos(unittest.TestCase):
                 }
             },
         )
-        download_response = SimpleNamespace(content=b"fake-video-bytes")
+        download_response = SimpleNamespace(
+            status_code=200, content=b"fake-video-bytes"
+        )
 
         with patch(
             "app.services.minimax_video.requests.post",

@@ -350,6 +350,22 @@ def _download_to_cache(content_url: str, task_id: str) -> str:
             f"MiniMax video download failed: {type(exc).__name__}"
         ) from exc
 
+    if response.status_code != 200:
+        detail = ""
+        try:
+            detail = str(response.text or "")[:MAX_ERROR_BODY_CHARS]
+        except Exception:
+            detail = ""
+        message = f"MiniMax video download returned HTTP {response.status_code}"
+        if detail:
+            message = f"{message}: {detail}"
+        logger.error(
+            "MiniMax video download failed: "
+            f"task_id={task_id}, status={response.status_code}, "
+            f"detail={detail or 'unavailable'}"
+        )
+        raise MiniMaxVideoAPIError(message, status_code=response.status_code)
+
     with open(destination, "wb") as f:
         f.write(response.content)
     return destination
