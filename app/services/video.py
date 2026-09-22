@@ -237,6 +237,39 @@ def plan_clip_durations(
     return durations
 
 
+def _next_planned_clip_duration(
+    cut_positions: List[float],
+    *,
+    current_duration: float,
+    max_clip_duration: float,
+    tolerance: float,
+) -> float | None:
+    """本段在成片时间线上该播多久；没有可用切点时返回 None。
+
+    `plan_clip_durations` 产出的是「成片时间轴上的绝对切点」，所以这里按
+    已经产出的成片时长去找下一个切点，而不是按「这是第几段」。源素材尾部
+    不够长时那一段会被迫播短，如果下一段仍按序号取排期，就等于假设前面每
+    段都播满，后面每一刀都会提前同样多，误差逐段累积、越往后越偏离句末。
+    按位置取则自动自纠：偏短了下一段拉长补回来，超了下一段缩短。
+    """
+    if not cut_positions or max_clip_duration <= 0:
+        return None
+    tolerance = max(0.0, float(tolerance))
+    # 当前位置已经落在某个切点的容差内，说明刚结束的那一段实际上已经切在
+    # 句末附近，这个切点视为用掉了。否则每次偏短都会换来一个「差多少补多少」
+    # 的闪帧片段（偏短 0.2 秒就插入一个 0.2 秒的画面）。容差本身就是「离句末
+    # 多近算对齐」的既有定义，这里复用同一把尺子；再按 max_clip_duration 封顶，
+    # 避免容差被配置得过大时把所有切点都判成已用。
+    reached = min(tolerance, float(max_clip_duration))
+    for position in cut_positions:
+        remaining = float(position) - current_duration
+        if remaining > max(reached, 1e-6):
+            # 一段偏短不该换来一段超长的补偿画面：上限仍是「最大时长 + 吸附容差」，
+            # 和排期自身允许的最大片段长度保持一致，剩下的差额留给后面几段慢慢追。
+            return min(remaining, float(max_clip_duration) + tolerance)
+    return None
+
+
 def get_min_material_dimension() -> int:
     """
     返回素材最小边长阈值（像素），默认 `_MIN_MATERIAL_DIMENSION`。
@@ -871,7 +904,8 @@ def combine_videos(
     source_clip_duration = max_clip_duration * normalized_clip_speed
     # 没有字幕时间时完全不排期，保持“每段固定 max_clip_duration”的原有行为，
     # 避免默认路径因为计划里的末尾零头片段产生任何差异。
-    planned_durations: List[float] = []
+    planned_cut_positions: List[float] = []
+    snap_tolerance = 0.0
     if subtitle_boundaries:
         snap_tolerance = float(config.app.get("clip_cut_snap_tolerance", 1.0))
         planned_durations = plan_clip_durations(
@@ -880,6 +914,10 @@ def combine_videos(
             total_duration=required_video_duration,
             tolerance=snap_tolerance,
         )
+        # 排期以「每段多长」表达，但它编码的其实是成片时间轴上的绝对切点。
+        # 这里一次性换算成累计切点，后续按成片已产出的时长取用，避免偏短的
+        # 片段让后面所有切点整体前移。
+        planned_cut_positions = list(itertools.accumulate(planned_durations))
         logger.info(
             f"planned {len(planned_durations)} speech-anchored clips "
             f"(snap tolerance: {snap_tolerance:.2f}s)"
@@ -976,13 +1014,13 @@ def combine_videos(
             source_clip = _open_video_clip_quietly(subclipped_item.file_path)
             # 切片循环是按“每个源文件”独立进行的，而 _prioritize_unique_source_clips
             # 与顺序模式的后备片段轮换都会重排片段，因此切片顺序并不是成片顺序。
-            # 排期表描述的是成片时间线上第几段该播多久，只有在这里才知道当前片段
-            # 落在成片的哪个位置：已完成的片段数就是它的时间线序号。
-            timeline_index = len(processed_clips)
-            planned_duration = (
-                planned_durations[timeline_index]
-                if timeline_index < len(planned_durations)
-                else None
+            # 排期表描述的是成片时间线上的切点位置，只有在这里才知道当前片段落在
+            # 成片的哪个位置：video_duration 就是已经产出的成片时长。
+            planned_duration = _next_planned_clip_duration(
+                planned_cut_positions,
+                current_duration=video_duration,
+                max_clip_duration=max_clip_duration,
+                tolerance=snap_tolerance,
             )
             target_duration = planned_duration or max_clip_duration
             source_end_time = subclipped_item.end_time

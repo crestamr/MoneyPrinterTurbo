@@ -1,3 +1,4 @@
+import itertools
 import os
 import shutil
 import sys
@@ -843,17 +844,28 @@ class TestVideoService(unittest.TestCase):
     def _capture_source_ranges_for_clip_speed(
         self,
         *,
-        source_duration,
         audio_duration,
         clip_speed,
+        source_duration=None,
+        source_durations=None,
         max_clip_duration=3,
         subtitle_boundaries=None,
         snap_tolerance=1.0,
+        video_concat_mode=None,
     ):
-        """使用轻量假视频记录 combine_videos 实际读取的源时间范围。"""
+        """使用轻量假视频记录 combine_videos 实际读取的源时间范围。
+
+        传 ``source_durations``（``{路径: 时长}``）可以模拟多个长短不一的素材，
+        用于验证某个素材尾部偏短时后续切点是否仍然落在计划位置上。
+        """
 
         source_ranges = []
         written_durations = []
+        durations_by_path = (
+            dict(source_durations)
+            if source_durations
+            else {"clip.mp4": source_duration}
+        )
 
         class _FakeAudioClip:
             duration = audio_duration
@@ -882,8 +894,10 @@ class TestVideoService(unittest.TestCase):
             def close(self):
                 pass
 
-        def _open_fake_video_clip(_video_path):
-            return _FakeVideoClip(source_duration, records_source_range=True)
+        def _open_fake_video_clip(video_path):
+            return _FakeVideoClip(
+                durations_by_path[video_path], records_source_range=True
+            )
 
         def _capture_written_clip(clip, *_args, **_kwargs):
             written_durations.append(clip.duration)
@@ -917,9 +931,11 @@ class TestVideoService(unittest.TestCase):
             ):
                 vd.combine_videos(
                     combined_video_path=combined_video_path,
-                    video_paths=["clip.mp4"],
+                    video_paths=list(durations_by_path),
                     audio_file="audio.mp3",
-                    video_concat_mode=vd.VideoConcatMode.random,
+                    video_concat_mode=(
+                        video_concat_mode or vd.VideoConcatMode.random
+                    ),
                     max_clip_duration=max_clip_duration,
                     clip_speed=clip_speed,
                     subtitle_boundaries=subtitle_boundaries,
@@ -993,6 +1009,71 @@ class TestVideoService(unittest.TestCase):
 
         self.assertAlmostEqual(source_ranges[0][1], 10.8)
         self.assertAlmostEqual(written_durations[0], 5.4)
+
+    @staticmethod
+    def _cut_positions(written_durations):
+        """把每段时长换算成它在成片时间线上的切点位置。"""
+        return list(itertools.accumulate(written_durations))
+
+    def test_a_short_clip_does_not_shift_the_following_cuts(self):
+        """
+        素材尾巴不够长时那一段会偏短，但后面的切点必须仍然落在计划位置上。
+
+        按“第几段”取排期会假设前面每段都播满：第一段少播 0.5 秒，后面每一刀
+        就整体提前 0.5 秒，越往后越偏离句末，长视频上等于完全失效。
+        """
+        _, written_durations = self._capture_source_ranges_for_clip_speed(
+            # 4.5 秒的素材撑不满 5 秒的排期，第一段只能播 4.5 秒。
+            source_durations={
+                "short.mp4": 4.5,
+                "b.mp4": 30.0,
+                "c.mp4": 30.0,
+                "d.mp4": 30.0,
+            },
+            audio_duration=19.9,
+            clip_speed=1.0,
+            max_clip_duration=5,
+            subtitle_boundaries=[5.0, 10.0, 15.0, 20.0],
+            video_concat_mode=vd.VideoConcatMode.sequential,
+        )
+
+        self.assertAlmostEqual(written_durations[0], 4.5, places=6)
+        # 第二段拉长 0.5 秒把时间线拉回 10.0 这个句末切点。
+        self.assertAlmostEqual(written_durations[1], 5.5, places=6)
+        cut_positions = self._cut_positions(written_durations)
+        self.assertAlmostEqual(cut_positions[1], 10.0, places=6)
+        # 后面的切点不再受前面那次偏短影响。
+        self.assertAlmostEqual(cut_positions[2], 15.0, places=6)
+        self.assertAlmostEqual(cut_positions[3], 20.0, places=6)
+
+    def test_cut_positions_track_the_plan_after_a_large_shortfall(self):
+        """偏短幅度较大时也应在下一段补回来，切点累计位置继续贴着句末。"""
+        _, written_durations = self._capture_source_ranges_for_clip_speed(
+            source_durations={
+                "short.mp4": 2.0,
+                "b.mp4": 30.0,
+                "c.mp4": 30.0,
+                "d.mp4": 30.0,
+                "e.mp4": 30.0,
+                "f.mp4": 30.0,
+            },
+            audio_duration=19.9,
+            clip_speed=1.0,
+            max_clip_duration=5,
+            subtitle_boundaries=[5.0, 10.0, 15.0, 20.0],
+            video_concat_mode=vd.VideoConcatMode.sequential,
+        )
+
+        self.assertAlmostEqual(written_durations[0], 2.0, places=6)
+        cut_positions = self._cut_positions(written_durations)
+        for planned_cut in (5.0, 10.0, 15.0, 20.0):
+            self.assertTrue(
+                any(
+                    abs(position - planned_cut) < 1e-6
+                    for position in cut_positions
+                ),
+                f"planned cut {planned_cut} missing from {cut_positions}",
+            )
 
     def _capture_sequential_source_reads(
         self,
@@ -1769,6 +1850,56 @@ class TestPlanClipDurations(unittest.TestCase):
                 [3.0], max_clip_duration=5, total_duration=0, tolerance=1.0
             ),
             [],
+        )
+
+
+class TestNextPlannedClipDuration(unittest.TestCase):
+    """排期必须按成片位置取用，否则一次偏短会让后面所有切点整体前移。"""
+
+    def _target(self, positions, current, *, max_clip_duration=5, tolerance=1.0):
+        return vd._next_planned_clip_duration(
+            positions,
+            current_duration=current,
+            max_clip_duration=max_clip_duration,
+            tolerance=tolerance,
+        )
+
+    def test_without_a_plan_there_is_no_target(self):
+        self.assertIsNone(self._target([], 0.0))
+
+    def test_targets_the_next_cut_ahead_of_the_current_position(self):
+        self.assertAlmostEqual(self._target([5.0, 10.0, 15.0], 5.0), 5.0, places=6)
+
+    def test_stretches_to_the_next_cut_after_a_short_clip(self):
+        # 上一段少播了 0.5 秒，这一段应该拉长到 5.5 秒把时间线拉回 10.0。
+        self.assertAlmostEqual(self._target([5.0, 10.0], 4.5), 5.5, places=6)
+
+    def test_shrinks_when_the_timeline_ran_past_a_cut(self):
+        self.assertAlmostEqual(self._target([5.0, 10.0], 6.0), 4.0, places=6)
+
+    def test_never_returns_a_non_positive_target(self):
+        for current in (10.0, 12.0, 99.0):
+            with self.subTest(current=current):
+                target = self._target([5.0, 10.0], current)
+                self.assertTrue(target is None or target > 0)
+
+    def test_falls_back_when_every_cut_is_already_behind(self):
+        self.assertIsNone(self._target([5.0, 10.0], 10.0))
+
+    def test_caps_the_catch_up_at_max_plus_tolerance(self):
+        # 计划里出现一个很远的切点时，单段也不能被拉成一个超长镜头。
+        self.assertAlmostEqual(self._target([40.0], 0.0), 6.0, places=6)
+
+    def test_zero_tolerance_still_targets_the_very_next_cut(self):
+        self.assertAlmostEqual(
+            self._target([5.0, 10.0], 4.5, tolerance=0.0), 0.5, places=6
+        )
+
+    def test_a_huge_tolerance_cannot_discard_every_cut(self):
+        # 容差被配置得比片段还长时，判定“已经切过”的窗口按最大时长封顶，
+        # 否则所有切点都会被判成已用，排期等于失效。
+        self.assertAlmostEqual(
+            self._target([5.0, 10.0], 0.0, tolerance=20.0), 10.0, places=6
         )
 
 
