@@ -289,6 +289,65 @@ def get_kokoro_voices(*, fallback: bool = True) -> list[str]:
     return voices or ([f"kokoro:{KOKORO_DEFAULT_VOICE}"] if fallback else [])
 
 
+OMNIVOICE_PREFIX = "omnivoice:"
+
+
+def _omnivoice_base_url() -> str:
+    return (config.omnivoice.get("base_url", "") or "").strip().rstrip("/")
+
+
+def get_omnivoice_voices(*, fallback: bool = False) -> list[str]:
+    """列出本地 OmniVoice 服务提供的音色。
+
+    音色是磁盘上的参考音频，没有内置默认值可回退：服务不可用时返回空列表，
+    由 WebUI 提示用户先启动服务。``fallback`` 仅为与其它 provider 的签名
+    保持一致，本 provider 无默认音色可用。
+    """
+    base_url = _omnivoice_base_url()
+    if not base_url:
+        return []
+    try:
+        headers = {}
+        api_key = config.omnivoice.get("api_key", "")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        response = requests.get(
+            f"{base_url}/audio/voices", headers=headers, timeout=5
+        )
+        if response.status_code != 200:
+            logger.warning(
+                f"omnivoice voice list failed with status {response.status_code}"
+            )
+            return []
+        data = response.json()
+        listed = data.get("voices", []) if isinstance(data, dict) else data
+        voices = []
+        for entry in listed or []:
+            name = str(entry).strip().removeprefix(OMNIVOICE_PREFIX).strip()
+            value = f"{OMNIVOICE_PREFIX}{name}"
+            if name and value not in voices:
+                voices.append(value)
+        return voices
+    except Exception as e:
+        # 不输出 URL/异常正文，与 kokoro 等自托管 provider 的日志策略保持一致。
+        logger.warning(f"omnivoice voice list unavailable ({type(e).__name__})")
+        return []
+
+
+def is_omnivoice_reachable() -> bool:
+    """本地 OmniVoice 服务的健康检查是否有响应。"""
+    base_url = _omnivoice_base_url()
+    if not base_url:
+        return False
+    try:
+        # /health 与 /v1 平级，不在其之下。
+        response = requests.get(f"{base_url.removesuffix('/v1')}/health", timeout=3)
+        return response.status_code == 200
+    except Exception as e:
+        logger.warning(f"omnivoice health check failed ({type(e).__name__})")
+        return False
+
+
 def get_fish_audio_voices() -> list[str]:
     """Return configured Fish Audio voices.
 
@@ -433,6 +492,10 @@ def is_kokoro_voice(voice_name: str) -> bool:
     return (voice_name or "").startswith("kokoro:")
 
 
+def is_omnivoice_voice(voice_name: str) -> bool:
+    return (voice_name or "").startswith(OMNIVOICE_PREFIX)
+
+
 def is_fish_audio_voice(voice_name: str) -> bool:
     return (voice_name or "").startswith("fish_audio:")
 
@@ -484,6 +547,8 @@ def is_azure_v1_voice(voice_name: str | None) -> bool:
     if is_chatterbox_voice(name):
         return False
     if is_kokoro_voice(name):
+        return False
+    if is_omnivoice_voice(name):
         return False
     if is_fish_audio_voice(name):
         return False
@@ -701,6 +766,17 @@ def _single_tts(
             )
         else:
             logger.error(f"Invalid kokoro voice name format: {voice_name}")
+            return None
+    elif is_omnivoice_voice(voice_name):
+        # 格式: omnivoice:<voice>。音色 ID 来自 storage/voices 下的文件名，
+        # 不带 -Female/-Male 展示后缀，因此不做后缀剥离，避免误伤含连字符的文件名。
+        parts = voice_name.split(":", 1)
+        if len(parts) >= 2 and parts[1].strip():
+            return omnivoice_tts(
+                text, parts[1].strip(), voice_file, voice_rate, voice_volume
+            )
+        else:
+            logger.error(f"Invalid omnivoice voice name format: {voice_name}")
             return None
     elif is_fish_audio_voice(voice_name):
         parts = voice_name.split(":")
@@ -2316,6 +2392,43 @@ def kokoro_tts(
         model_id = config.kokoro.get("model_id", "kokoro") or "kokoro"
     return _openai_compatible_tts(
         "kokoro", base_url, api_key, model_id, voice, text, voice_rate, voice_file
+    )
+
+
+def omnivoice_tts(
+    text: str,
+    voice: str,
+    voice_file: str,
+    voice_rate: float = 1.0,
+    voice_volume: float = 1.0,
+    model_id: str = "",
+) -> Union[SubMaker, None]:
+    """Generate speech with the local OmniVoice wrapper service.
+
+    OmniVoice (k2-fsa/OmniVoice, Apache-2.0 code and weights) is a zero-shot
+    multilingual model that clones a voice from a short reference clip, so it
+    needs no API key and no network. Voices are the reference clips in
+    ``storage/voices``; see ``services/omnivoice_server``.
+
+    Like Kokoro and Chatterbox the OpenAI speech contract returns no word-level
+    timestamps, so subtitles fall back to the full-text SubMaker. Set
+    ``subtitle_provider = "whisper"`` for tighter sync.
+    """
+    text = (text or "").strip()
+    if not text:
+        logger.error("OmniVoice TTS text is empty")
+        return None
+    base_url = _omnivoice_base_url()
+    if not base_url:
+        logger.error(
+            "OmniVoice base_url is not set, please configure [omnivoice] base_url in config.toml"
+        )
+        return None
+    api_key = config.omnivoice.get("api_key", "")
+    if not model_id:
+        model_id = config.omnivoice.get("model_id", "omnivoice") or "omnivoice"
+    return _openai_compatible_tts(
+        "omnivoice", base_url, api_key, model_id, voice, text, voice_rate, voice_file
     )
 
 

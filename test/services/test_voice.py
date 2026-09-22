@@ -2109,6 +2109,145 @@ class TestElevenLabsVoice(unittest.TestCase):
             self.assertEqual(called_text, original_text)
 
 
+class TestOmniVoiceProvider(unittest.TestCase):
+    """Client side of the local OmniVoice wrapper service (HTTP only)."""
+
+    def test_is_omnivoice_voice_matches_only_the_prefix(self):
+        self.assertTrue(vs.is_omnivoice_voice("omnivoice:narrator"))
+        self.assertFalse(vs.is_omnivoice_voice("kokoro:af_heart"))
+        self.assertFalse(vs.is_omnivoice_voice(""))
+        self.assertFalse(vs.is_omnivoice_voice(None))
+        # OmniVoice must not be mistaken for an Edge TTS voice, otherwise a
+        # script with [pause: ...] tags would enter the Azure v1 split path.
+        self.assertFalse(vs.is_azure_v1_voice("omnivoice:narrator"))
+
+    def test_omnivoice_tts_posts_the_openai_payload(self):
+        """Success path: POST {base_url}/audio/speech with the OpenAI body."""
+
+        class _FakeResponse:
+            status_code = 200
+            content = b"fake-mp3"
+            text = ""
+
+        class _FakeClip:
+            duration = 2.0
+
+            def close(self):
+                pass
+
+        captured = {}
+
+        def _fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return _FakeResponse()
+
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.object(
+            vs.config,
+            "omnivoice",
+            {
+                "base_url": "http://127.0.0.1:8890/v1/",
+                "api_key": "",
+                "model_id": "omnivoice",
+            },
+        ), patch.object(
+            vs.requests, "post", side_effect=_fake_post
+        ) as post, patch.object(
+            vs, "AudioFileClip", return_value=_FakeClip()
+        ):
+            voice_file = str(Path(tmp_dir) / "omnivoice.mp3")
+            sub_maker = vs.omnivoice_tts(
+                text="Hello.",
+                voice="narrator",
+                voice_file=voice_file,
+                voice_rate=1.5,
+            )
+            generated_audio = Path(voice_file).read_bytes()
+
+        post.assert_called_once()
+        self.assertEqual(captured["url"], "http://127.0.0.1:8890/v1/audio/speech")
+        self.assertEqual(captured["json"]["model"], "omnivoice")
+        self.assertEqual(captured["json"]["input"], "Hello.")
+        self.assertEqual(captured["json"]["voice"], "narrator")
+        self.assertAlmostEqual(captured["json"]["speed"], 1.5)
+        # the local service needs no credentials, so no bearer token is sent
+        self.assertNotIn("Authorization", captured["headers"])
+        self.assertEqual(generated_audio, b"fake-mp3")
+        self.assertIsNotNone(sub_maker)
+        self.assertTrue(getattr(sub_maker, "subs", []))
+
+    def test_omnivoice_tts_fails_clearly_without_a_base_url(self):
+        """Missing base_url short-circuits without any network call."""
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.object(
+            vs.config, "omnivoice", {"base_url": ""}
+        ), patch.object(vs.requests, "post") as post:
+            result = vs.omnivoice_tts(
+                text="Hello.",
+                voice="narrator",
+                voice_file=str(Path(tmp_dir) / "omnivoice.mp3"),
+            )
+        self.assertIsNone(result)
+        post.assert_not_called()
+
+    def test_get_omnivoice_voices_prefixes_ids_from_the_service(self):
+        fake = SimpleNamespace(
+            status_code=200, json=lambda: {"voices": ["narrator", " host ", ""]}
+        )
+        with patch.object(
+            vs.config, "omnivoice", {"base_url": "http://127.0.0.1:8890/v1"}
+        ), patch.object(vs.requests, "get", return_value=fake) as get:
+            self.assertEqual(
+                vs.get_omnivoice_voices(),
+                ["omnivoice:narrator", "omnivoice:host"],
+            )
+        self.assertEqual(
+            get.call_args[0][0], "http://127.0.0.1:8890/v1/audio/voices"
+        )
+
+    def test_get_omnivoice_voices_is_empty_when_the_service_is_down(self):
+        """Voices are reference clips on disk, so there is no default to fall back to."""
+        with patch.object(
+            vs.config, "omnivoice", {"base_url": "http://127.0.0.1:8890/v1"}
+        ), patch.object(
+            vs.requests, "get", side_effect=vs.requests.RequestException("down")
+        ):
+            self.assertEqual(vs.get_omnivoice_voices(), [])
+
+        # an unconfigured base_url must not attempt any request either
+        with patch.object(vs.config, "omnivoice", {}), patch.object(
+            vs.requests, "get"
+        ) as get:
+            self.assertEqual(vs.get_omnivoice_voices(), [])
+        get.assert_not_called()
+
+    def test_is_omnivoice_reachable_reflects_health(self):
+        ok = SimpleNamespace(status_code=200, json=lambda: {"status": "ok"})
+        with patch.object(
+            vs.config, "omnivoice", {"base_url": "http://127.0.0.1:8890/v1"}
+        ), patch.object(vs.requests, "get", return_value=ok) as get:
+            self.assertTrue(vs.is_omnivoice_reachable())
+        # /health sits beside /v1, not under it
+        self.assertEqual(get.call_args[0][0], "http://127.0.0.1:8890/health")
+
+        with patch.object(
+            vs.config, "omnivoice", {"base_url": "http://127.0.0.1:8890/v1"}
+        ), patch.object(
+            vs.requests, "get", side_effect=vs.requests.RequestException("down")
+        ):
+            self.assertFalse(vs.is_omnivoice_reachable())
+
+    def test_omnivoice_dispatch_strips_the_prefix(self):
+        """tts() routes omnivoice:<id> to omnivoice_tts with the bare voice id."""
+        sentinel = object()
+        with patch.object(vs, "omnivoice_tts", return_value=sentinel) as implementation:
+            result = vs.tts("test", "omnivoice:narrator", 1.0, "voice.mp3", 1.0)
+        self.assertIs(result, sentinel)
+        implementation.assert_called_once_with(
+            "test", "narrator", "voice.mp3", 1.0, 1.0
+        )
+
+
 if __name__ == "__main__":
     # python -m unittest test.services.test_voice.TestVoiceService.test_azure_tts_v1
     # python -m unittest test.services.test_voice.TestVoiceService.test_azure_tts_v2
