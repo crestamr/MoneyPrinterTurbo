@@ -496,6 +496,7 @@ def save_config():
         config_to_save["siliconflow"] = dict(siliconflow)
         config_to_save["minimax_tts"] = dict(minimax_tts)
         config_to_save["minimax_video"] = dict(minimax_video)
+        config_to_save["qwen_image"] = dict(qwen_image)
         config_to_save["elevenlabs"] = dict(elevenlabs)
         config_to_save["chatterbox"] = dict(chatterbox)
         config_to_save["ui"] = dict(ui)
