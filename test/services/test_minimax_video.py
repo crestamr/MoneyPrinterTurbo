@@ -1,6 +1,8 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -103,6 +105,75 @@ class TestMiniMaxVideoMapping(unittest.TestCase):
         self.assertEqual(
             minimax_video._clamp_duration(2, model="MiniMax-H3-Max"), 5
         )
+
+
+class TestMiniMaxCreateTask(unittest.TestCase):
+    def test_create_task_returns_task_id_on_success(self):
+        fake_response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"task_id": "task-abc123"},
+        )
+        with patch(
+            "app.services.minimax_video.requests.post",
+            return_value=fake_response,
+        ) as post:
+            task_id = minimax_video._create_task(
+                prompt="a cat playing piano",
+                resolution="768P",
+                duration=5,
+                ratio="9:16",
+                model="MiniMax-H3",
+                api_key="test-key",
+                base_url="https://api.minimax.io",
+            )
+
+        self.assertEqual(task_id, "task-abc123")
+        self.assertEqual(
+            post.call_args.kwargs["headers"]["Authorization"], "Bearer test-key"
+        )
+        self.assertEqual(
+            post.call_args.kwargs["json"]["content"],
+            [{"type": "text", "text": "a cat playing piano"}],
+        )
+
+    def test_create_task_raises_on_non_200_status(self):
+        fake_response = SimpleNamespace(
+            status_code=402,
+            json=lambda: {"error": "insufficient balance"},
+            text="insufficient balance",
+        )
+        with patch(
+            "app.services.minimax_video.requests.post",
+            return_value=fake_response,
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError) as ctx:
+                minimax_video._create_task(
+                    prompt="a cat playing piano",
+                    resolution="768P",
+                    duration=5,
+                    ratio="9:16",
+                    model="MiniMax-H3",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                )
+        self.assertEqual(ctx.exception.status_code, 402)
+
+    def test_create_task_raises_when_task_id_is_missing(self):
+        fake_response = SimpleNamespace(status_code=200, json=lambda: {})
+        with patch(
+            "app.services.minimax_video.requests.post",
+            return_value=fake_response,
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError):
+                minimax_video._create_task(
+                    prompt="a cat playing piano",
+                    resolution="768P",
+                    duration=5,
+                    ratio="9:16",
+                    model="MiniMax-H3",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                )
 
 
 if __name__ == "__main__":

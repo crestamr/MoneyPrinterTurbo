@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 from urllib.parse import urlparse
 
+import requests
+
 from app.config import config
 
 MINIMAX_VIDEO_GLOBAL_BASE_URL = "https://api.minimax.io"
@@ -107,3 +109,56 @@ def _aspect_to_ratio(video_aspect) -> str:
 def _clamp_duration(minimum_duration: int, *, model: str) -> int:
     low, high = MODEL_DURATION_RANGES.get(model, MODEL_DURATION_RANGES[DEFAULT_MODEL])
     return max(low, min(high, int(minimum_duration)))
+
+
+def _create_task(
+    *,
+    prompt: str,
+    resolution: str,
+    duration: int,
+    ratio: str,
+    model: str,
+    api_key: str,
+    base_url: str,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+) -> str:
+    url = f"{base_url}/v2/video_generation"
+    payload = {
+        "model": model,
+        "content": [{"type": "text", "text": prompt}],
+        "resolution": resolution,
+        "duration": duration,
+        "ratio": ratio,
+    }
+    try:
+        response = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=(5.0, request_timeout),
+        )
+    except requests.RequestException as exc:
+        raise MiniMaxVideoAPIError(
+            f"MiniMax video create request failed: {type(exc).__name__}"
+        ) from exc
+
+    if response.status_code != 200:
+        raise MiniMaxVideoAPIError(
+            f"MiniMax video create returned HTTP {response.status_code}",
+            status_code=response.status_code,
+        )
+
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise MiniMaxVideoAPIError(
+            "MiniMax video create returned invalid JSON"
+        ) from exc
+
+    task_id = str(body.get("task_id", "")).strip()
+    if not task_id:
+        raise MiniMaxVideoAPIError("MiniMax video create response is missing task_id")
+    return task_id
