@@ -8,6 +8,7 @@ its provider dispatch without a circular import.
 from __future__ import annotations
 
 import os
+import time
 from urllib.parse import urlparse
 
 import requests
@@ -197,3 +198,118 @@ def _create_task(
         logger.error("MiniMax video create response is missing task_id")
         raise MiniMaxVideoAPIError("MiniMax video create response is missing task_id")
     return task_id
+
+
+def _poll_task(
+    *,
+    task_id: str,
+    api_key: str,
+    base_url: str,
+    poll_interval_seconds: float,
+    poll_timeout_seconds: float,
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+) -> str:
+    """Poll a MiniMax video generation task until it succeeds, fails, or times out.
+
+    Returns the presigned content URL on success. Raises MiniMaxVideoAPIError on
+    any request failure, non-200 response, non-JSON body, non-dict JSON body, a
+    response missing task status, or a failed/cancelled task. Raises
+    MiniMaxVideoError if the task does not complete within poll_timeout_seconds.
+    """
+    url = f"{base_url}/v2/query/video_generation/{task_id}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    deadline = time.monotonic() + poll_timeout_seconds
+
+    while True:
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=(DEFAULT_CONNECT_TIMEOUT_SECONDS, request_timeout),
+            )
+        except requests.RequestException as exc:
+            logger.error(
+                f"MiniMax video query request failed: error={type(exc).__name__}"
+            )
+            raise MiniMaxVideoAPIError(
+                f"MiniMax video query request failed: {type(exc).__name__}"
+            ) from exc
+
+        if response.status_code != 200:
+            detail = ""
+            try:
+                detail = str(response.text or "")[:MAX_ERROR_BODY_CHARS]
+            except Exception:
+                detail = ""
+            message = f"MiniMax video query returned HTTP {response.status_code}"
+            if detail:
+                message = f"{message}: {detail}"
+            logger.error(
+                "MiniMax video query failed: "
+                f"status={response.status_code}, detail={detail or 'unavailable'}"
+            )
+            raise MiniMaxVideoAPIError(message, status_code=response.status_code)
+
+        try:
+            body = response.json()
+        except ValueError as exc:
+            logger.error("MiniMax video query returned invalid JSON")
+            raise MiniMaxVideoAPIError(
+                "MiniMax video query returned invalid JSON"
+            ) from exc
+
+        if not isinstance(body, dict):
+            logger.error(
+                "MiniMax video query response is not a JSON object: "
+                f"type={type(body).__name__}"
+            )
+            raise MiniMaxVideoAPIError(
+                "MiniMax video query response is not a JSON object"
+            )
+
+        task = body.get("task")
+        if not isinstance(task, dict):
+            logger.error("MiniMax video query response is missing task")
+            raise MiniMaxVideoAPIError("MiniMax video query response is missing task")
+
+        status = str(task.get("status", "")).strip().lower()
+        if status == "succeeded":
+            content = task.get("content")
+            content_url = (
+                str(content.get("url", "")).strip()
+                if isinstance(content, dict)
+                else ""
+            )
+            if not content_url:
+                logger.error(
+                    "MiniMax video task succeeded but returned no content url: "
+                    f"task_id={task_id}"
+                )
+                raise MiniMaxVideoAPIError(
+                    "MiniMax video task succeeded but returned no content url"
+                )
+            return content_url
+
+        if status in {"failed", "cancelled"}:
+            error = task.get("error")
+            detail = (
+                str(error.get("message", "")).strip()
+                if isinstance(error, dict)
+                else ""
+            ) or status
+            logger.error(
+                f"MiniMax video task {status}: task_id={task_id}, detail={detail}"
+            )
+            raise MiniMaxVideoAPIError(f"MiniMax video task {status}: {detail}")
+
+        if time.monotonic() >= deadline:
+            logger.error(
+                "MiniMax video task did not complete within timeout: "
+                f"task_id={task_id}, timeout={poll_timeout_seconds:g}"
+            )
+            raise MiniMaxVideoError(
+                f"MiniMax video task {task_id} did not complete within "
+                f"{poll_timeout_seconds:g} seconds"
+            )
+
+        time.sleep(poll_interval_seconds)

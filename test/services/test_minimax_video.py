@@ -214,5 +214,80 @@ class TestMiniMaxCreateTask(unittest.TestCase):
                 )
 
 
+class TestMiniMaxPollTask(unittest.TestCase):
+    def test_poll_task_returns_content_url_on_success(self):
+        responses = [
+            SimpleNamespace(
+                status_code=200,
+                json=lambda: {"task": {"status": "running"}},
+            ),
+            SimpleNamespace(
+                status_code=200,
+                json=lambda: {
+                    "task": {
+                        "status": "succeeded",
+                        "content": {"url": "https://cdn.example.com/video.mp4"},
+                    }
+                },
+            ),
+        ]
+        with patch(
+            "app.services.minimax_video.requests.get", side_effect=responses
+        ), patch("app.services.minimax_video.time.sleep") as sleep_mock:
+            content_url = minimax_video._poll_task(
+                task_id="task-abc123",
+                api_key="test-key",
+                base_url="https://api.minimax.io",
+                poll_interval_seconds=1.0,
+                poll_timeout_seconds=10.0,
+            )
+
+        self.assertEqual(content_url, "https://cdn.example.com/video.mp4")
+        sleep_mock.assert_called_once()
+
+    def test_poll_task_raises_with_message_on_failure(self):
+        fake_response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "task": {
+                    "status": "failed",
+                    "error": {"code": "2013", "message": "invalid parameters"},
+                }
+            },
+        )
+        with patch(
+            "app.services.minimax_video.requests.get", return_value=fake_response
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError) as ctx:
+                minimax_video._poll_task(
+                    task_id="task-abc123",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                    poll_interval_seconds=1.0,
+                    poll_timeout_seconds=10.0,
+                )
+        self.assertIn("invalid parameters", str(ctx.exception))
+
+    def test_poll_task_raises_on_timeout(self):
+        fake_response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"task": {"status": "running"}},
+        )
+        clock = iter([0.0, 0.0, 11.0])
+        with patch(
+            "app.services.minimax_video.requests.get", return_value=fake_response
+        ), patch("app.services.minimax_video.time.sleep"), patch(
+            "app.services.minimax_video.time.monotonic", side_effect=lambda: next(clock)
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoError):
+                minimax_video._poll_task(
+                    task_id="task-abc123",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                    poll_interval_seconds=1.0,
+                    poll_timeout_seconds=10.0,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
