@@ -11,6 +11,7 @@ import os
 from urllib.parse import urlparse
 
 import requests
+from loguru import logger
 
 from app.config import config
 
@@ -22,6 +23,11 @@ DEFAULT_RESOLUTION = "768P"
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_POLL_TIMEOUT_SECONDS = 300.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
+
+# Bound how much of a non-200 response body we fold into the error message,
+# mirroring elevenlabs_music.py's _safe_response_error truncation.
+MAX_ERROR_BODY_CHARS = 200
 
 # (min_duration, max_duration) seconds, per the platform.minimax.io API docs.
 MODEL_DURATION_RANGES = {
@@ -122,6 +128,11 @@ def _create_task(
     base_url: str,
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
 ) -> str:
+    """Submit a MiniMax H3 video generation job and return its task_id.
+
+    Raises MiniMaxVideoAPIError on any request failure, non-200 response,
+    non-JSON body, non-dict JSON body, or a response missing task_id.
+    """
     url = f"{base_url}/v2/video_generation"
     payload = {
         "model": model,
@@ -138,27 +149,51 @@ def _create_task(
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=(5.0, request_timeout),
+            timeout=(DEFAULT_CONNECT_TIMEOUT_SECONDS, request_timeout),
         )
     except requests.RequestException as exc:
+        logger.error(
+            f"MiniMax video create request failed: error={type(exc).__name__}"
+        )
         raise MiniMaxVideoAPIError(
             f"MiniMax video create request failed: {type(exc).__name__}"
         ) from exc
 
     if response.status_code != 200:
-        raise MiniMaxVideoAPIError(
-            f"MiniMax video create returned HTTP {response.status_code}",
-            status_code=response.status_code,
+        detail = ""
+        try:
+            detail = str(response.text or "")[:MAX_ERROR_BODY_CHARS]
+        except Exception:
+            detail = ""
+        message = f"MiniMax video create returned HTTP {response.status_code}"
+        if detail:
+            message = f"{message}: {detail}"
+        logger.error(
+            "MiniMax video create failed: "
+            f"status={response.status_code}, detail={detail or 'unavailable'}"
         )
+        raise MiniMaxVideoAPIError(message, status_code=response.status_code)
 
     try:
         body = response.json()
     except ValueError as exc:
+        logger.error("MiniMax video create returned invalid JSON")
         raise MiniMaxVideoAPIError(
             "MiniMax video create returned invalid JSON"
         ) from exc
 
-    task_id = str(body.get("task_id", "")).strip()
+    if not isinstance(body, dict):
+        logger.error(
+            "MiniMax video create response is not a JSON object: "
+            f"type={type(body).__name__}"
+        )
+        raise MiniMaxVideoAPIError(
+            "MiniMax video create response is not a JSON object"
+        )
+
+    raw_task_id = body.get("task_id")
+    task_id = str(raw_task_id).strip() if raw_task_id else ""
     if not task_id:
+        logger.error("MiniMax video create response is missing task_id")
         raise MiniMaxVideoAPIError("MiniMax video create response is missing task_id")
     return task_id

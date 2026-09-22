@@ -175,6 +175,44 @@ class TestMiniMaxCreateTask(unittest.TestCase):
                     base_url="https://api.minimax.io",
                 )
 
+    def test_create_task_raises_when_task_id_is_null(self):
+        fake_response = SimpleNamespace(
+            status_code=200, json=lambda: {"task_id": None}
+        )
+        with patch(
+            "app.services.minimax_video.requests.post",
+            return_value=fake_response,
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError):
+                minimax_video._create_task(
+                    prompt="a cat playing piano",
+                    resolution="768P",
+                    duration=5,
+                    ratio="9:16",
+                    model="MiniMax-H3",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                )
+
+    def test_create_task_raises_when_response_body_is_not_a_dict(self):
+        fake_response = SimpleNamespace(
+            status_code=200, json=lambda: ["unexpected", "list"]
+        )
+        with patch(
+            "app.services.minimax_video.requests.post",
+            return_value=fake_response,
+        ):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError):
+                minimax_video._create_task(
+                    prompt="a cat playing piano",
+                    resolution="768P",
+                    duration=5,
+                    ratio="9:16",
+                    model="MiniMax-H3",
+                    api_key="test-key",
+                    base_url="https://api.minimax.io",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
