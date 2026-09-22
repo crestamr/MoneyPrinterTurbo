@@ -159,6 +159,65 @@ class TestMptAgentSkill(unittest.TestCase):
             )
             self.assertNotIn(secret, output.getvalue())
 
+    def test_minimax_dedicated_video_key_satisfies_check(self):
+        """`[minimax_video].api_key` alone is enough; no shared LLM key needed."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(
+                MINIMAL_CONFIG
+                + '\nminimax_api_key = ""\n'
+                + "\n[minimax_video]\n"
+                + 'api_key = "dedicated-minimax-video-key"\n',
+                encoding="utf-8",
+            )
+
+            _, missing = mpt_agent.missing_config(
+                config_path, ["--video-source", "minimax"]
+            )
+
+            self.assertNotIn("minimax_video_api_key", missing)
+
+    def test_minimax_shared_llm_key_fallback_satisfies_check(self):
+        """
+        The dedicated [minimax_video].api_key is empty, but the shared MiniMax
+        LLM key (app.minimax_api_key) is configured. This mirrors
+        get_minimax_video_api_key()'s fallback and was completely broken
+        before this fix, since the old check only ever looked for a flat
+        top-level `minimax_api_keys` (plural) field that never exists.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(
+                MINIMAL_CONFIG
+                + '\nminimax_api_key = "shared-llm-key"\n'
+                + "\n[minimax_video]\n"
+                + 'api_key = ""\n',
+                encoding="utf-8",
+            )
+
+            _, missing = mpt_agent.missing_config(
+                config_path, ["--video-source", "minimax"]
+            )
+
+            self.assertNotIn("minimax_video_api_key", missing)
+
+    def test_minimax_neither_key_configured_is_reported_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.toml"
+            config_path.write_text(
+                MINIMAL_CONFIG
+                + '\nminimax_api_key = ""\n'
+                + "\n[minimax_video]\n"
+                + 'api_key = ""\n',
+                encoding="utf-8",
+            )
+
+            _, missing = mpt_agent.missing_config(
+                config_path, ["--video-source", "minimax"]
+            )
+
+            self.assertIn("minimax_video_api_key", missing)
+
     def test_only_missing_pexels_key_does_not_ask_for_llm_again(self):
         output = io.StringIO()
 

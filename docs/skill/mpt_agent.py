@@ -32,6 +32,7 @@ PEXELS_API_KEY_HELP_URL = (
     "https://help.pexels.com/hc/en-us/articles/"
     "900004904026-How-do-I-get-an-API-key"
 )
+MINIMAX_VIDEO_API_KEY_URL = "https://platform.minimax.io/"
 
 # Keep the recommended list focused on commonly used providers. When an LLM
 # key is missing, the helper emits all choices at once to avoid extra turns.
@@ -162,6 +163,26 @@ def _plain_config_value(text: str, key: str) -> str:
     if value.startswith('"') and value.endswith('"'):
         return value[1:-1]
     return value
+
+
+def _plain_config_value_in_section(text: str, section: str, key: str) -> str:
+    """
+    Read a simple TOML value scoped to one ``[section]`` table only.
+
+    ``_plain_config_value`` matches ``key = value`` anywhere in the file, so it
+    cannot distinguish ``[minimax_video].api_key`` from ``[minimax_tts].api_key``
+    when both tables define the same field name. This slices the raw text down
+    to the ``[section]`` table's body (from its header to the next top-level
+    ``[`` header or end of file) and delegates to ``_plain_config_value`` for
+    the actual value parsing, so both functions share one parsing path.
+    """
+    header_match = re.search(rf"(?m)^\[{re.escape(section)}\]\s*$", text)
+    if not header_match:
+        return ""
+    body_start = header_match.end()
+    next_header_match = re.search(r"(?m)^\[", text[body_start:])
+    body_end = body_start + next_header_match.start() if next_header_match else len(text)
+    return _plain_config_value(text[body_start:body_end], key)
 
 
 def _replace_config_value(text: str, key: str, value: object) -> str:
@@ -307,7 +328,16 @@ def missing_config(config_path: Path, cli_args: list[str]) -> tuple[str, list[st
     source = selected_video_source(cli_args)
     if source not in SUPPORTED_SOURCES:
         raise SkillError(f"unsupported video source: {source}")
-    if source != "local":
+    if source == "minimax":
+        # MiniMax video has no flat top-level `minimax_api_keys` field. A key
+        # is configured either as [minimax_video].api_key or, when that is
+        # left empty, by falling back to the shared MiniMax LLM key
+        # (app.minimax_api_key) exactly as app/services/minimax_video.py does.
+        dedicated_key = _plain_config_value_in_section(text, "minimax_video", "api_key")
+        shared_llm_key = _plain_config_value(text, "minimax_api_key")
+        if not _has_configured_value(dedicated_key) and not _has_configured_value(shared_llm_key):
+            missing.append("minimax_video_api_key")
+    elif source != "local":
         value = _plain_config_value(text, f"{source}_api_keys")
         if not _has_configured_value(value):
             missing.append(f"{source}_api_keys")
@@ -320,7 +350,14 @@ def report_missing_config(provider: str, missing: list[str]) -> int:
     print(f"LLM_PROVIDER={provider}")
     for field in missing:
         print(f"MISSING={field}")
-    if any(field.endswith("_api_key") for field in missing):
+    # "minimax_video_api_key" is a video-source credential, not an LLM
+    # provider key, even though it shares the "_api_key" suffix; exclude it
+    # so a missing MiniMax video key does not trigger the unrelated LLM
+    # provider picker.
+    if any(
+        field.endswith("_api_key") and field != "minimax_video_api_key"
+        for field in missing
+    ):
         print("LLM_PROVIDER_OPTIONS_BEGIN")
         for provider_id, (label, url) in RECOMMENDED_LLM_PROVIDERS.items():
             print(f"LLM_PROVIDER_OPTION={provider_id}|{label}|{url}")
@@ -337,6 +374,8 @@ def report_missing_config(provider: str, missing: list[str]) -> int:
     if "pexels_api_keys" in missing:
         print(f"PEXELS_API_KEY_URL={PEXELS_API_KEY_URL}")
         print(f"PEXELS_API_KEY_HELP_URL={PEXELS_API_KEY_HELP_URL}")
+    if "minimax_video_api_key" in missing:
+        print(f"MINIMAX_VIDEO_API_KEY_URL={MINIMAX_VIDEO_API_KEY_URL}")
     print("Request only the listed values, set the environment variables, and rerun the same command.")
     return NEEDS_INPUT_EXIT_CODE
 
