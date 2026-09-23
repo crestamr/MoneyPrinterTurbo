@@ -124,9 +124,26 @@ The Vulkan device index is machine-specific: index 0 is the NVIDIA card here.
 Confirm the choice in the server log, which should read
 `using device Vulkan0 (AMD Radeon(TM) 890M Graphics) ... 77452 MiB free`.
 
-ROCm would likely beat Vulkan, but the server logs
-`AMD driver is too old. Update your AMD driver to enable GPU inference.`
-Updating the Radeon driver is the obvious next experiment.
+### ROCm was tried and does not work - use Vulkan
+
+Before the Radeon driver was updated (to 32.0.31041.1004, August 2026) the
+server logged `AMD driver is too old. Update your AMD driver to enable GPU
+inference.` That warning is now gone, but the update changed nothing that
+matters. Measured after updating:
+
+| Backend | Speed |
+|---|---|
+| Vulkan on the 890M | 5.4 tok/s (was 5.2 before the update) |
+| ROCm forced via `OLLAMA_LLM_LIBRARY=rocm_v7_1` | falls back to `library=cpu`, 3.8 tok/s |
+
+Ollama no longer enumerates a ROCm device at all after the update - only
+`Vulkan0` (NVIDIA) and `Vulkan1` (AMD). This is not a missing-library problem:
+Ollama ships its own `rocm_v7_1` with a rocBLAS that lists `gfx1150`, and the
+HIP runtime (`amdhip64.dll`) is present in System32. Forcing the backend anyway
+just lands on the CPU, which is slower than Vulkan.
+
+So Vulkan is the answer on this machine. Do not spend time on ROCm again
+without new information.
 
 ### Thinking is disabled
 
