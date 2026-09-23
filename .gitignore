@@ -50,3 +50,7 @@ htmlcov/
 .venv-omnivoice/
 omnivoice-service.log
 omnivoice-service.err.log
+
+# Unrelated coursework files that happen to sit in this folder
+ITC101_*
+ITC_101*
