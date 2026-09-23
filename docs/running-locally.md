@@ -88,62 +88,47 @@ Note that `ollama pull hf.co/<repo>:<quant>` fails on Ollama 0.34.3 with
 `realm host "huggingface.co" does not match original host "hf.co"`. Download the
 `.gguf` with curl and `ollama create` from a Modelfile instead.
 
-### Two GPUs, one job each
+### Sharing the RTX by taking turns
 
-This machine has an RTX 5070 Ti (16 GB) **and** a Radeon 890M integrated GPU with
-32 GB carved out of system RAM. Ollama is pinned to the 890M so the RTX belongs
-entirely to ComfyUI.
+Ollama and ComfyUI both want the whole 16 GB card, and prompt expansion runs
+immediately before each image, so they collide. The answer is not to split the
+card or to move one of them off it - it is to make both release it when idle:
 
-This matters more than it sounds. The card has 16 GB and ComfyUI needs
-essentially all of it to generate an image, while prompt expansion runs
-immediately *before* each image. Measured, same two-clip pipeline each time:
+- `OLLAMA_KEEP_ALIVE=0` unloads the model as soon as a request finishes
+- ComfyUI runs with `--disable-smart-memory`, offloading to RAM instead of
+  holding VRAM between generations
 
-| LLM placement | Speed | Pipeline result |
+Reloading is cheap enough to make this work: about 3.6s from page cache, against
+53 tok/s on the GPU. Measured on the same two-clip pipeline:
+
+| LLM placement | Speed | Two-clip pipeline |
 |---|---|---|
-| RTX 5070 Ti (11.1 GB VRAM) | 25 tok/s | **0 clips - every image timed out** |
-| CPU only | 2.7 tok/s | 2 clips in 474s |
-| Radeon 890M via Vulkan | **5.2 tok/s** | **2 clips in 266s** |
+| RTX, both sides holding VRAM | 25 tok/s | **0 clips - every image timed out** |
+| CPU only | 2.7 tok/s | 474s |
+| Radeon 890M via Vulkan | 5.4 tok/s | 266s |
+| **RTX, both sides releasing VRAM** | **53 tok/s** | **160-207s** |
 
-Ollama hides integrated GPUs by default, logging
-`dropping integrated GPU; to enable, set OLLAMA_IGPU_ENABLE=1`. Enabling that is
-not enough on its own: Ollama still prefers the NVIDIA card, and hiding it from
-CUDA alone just makes Vulkan pick it up instead. `start-all.bat` launches the
-Ollama server with all three of these set, then clears the device variables so
-ComfyUI - started later by the same script - can still see CUDA:
+Both halves are required. If either process squats on VRAM the other starves,
+and image generation times out completely rather than merely slowing down.
+
+### The integrated GPU is a fallback, not the answer
+
+The Radeon 890M works and is documented here because it was the best option
+before the take-turns approach was found. Ollama hides integrated GPUs by
+default, logging `dropping integrated GPU; to enable, set OLLAMA_IGPU_ENABLE=1`.
+Enabling that is not sufficient - Ollama still prefers the NVIDIA card, and
+hiding it from CUDA alone just makes Vulkan pick it up instead. All three are
+needed, and `CUDA_VISIBLE_DEVICES` must never be set as a user-level variable
+because it would blind ComfyUI too:
 
 ```bat
 set "CUDA_VISIBLE_DEVICES=-1"      rem hide NVIDIA from the CUDA backend
-set "GGML_VK_VISIBLE_DEVICES=1"    rem pick the AMD device from the Vulkan list
+set "GGML_VK_VISIBLE_DEVICES=1"    rem pick AMD from the Vulkan list
 set "OLLAMA_IGPU_ENABLE=1"         rem allow integrated GPUs at all
 ```
 
-Never set `CUDA_VISIBLE_DEVICES` as a user-level environment variable. It would
-blind ComfyUI too.
-
-The Vulkan device index is machine-specific: index 0 is the NVIDIA card here.
-Confirm the choice in the server log, which should read
-`using device Vulkan0 (AMD Radeon(TM) 890M Graphics) ... 77452 MiB free`.
-
-### ROCm was tried and does not work - use Vulkan
-
-Before the Radeon driver was updated (to 32.0.31041.1004, August 2026) the
-server logged `AMD driver is too old. Update your AMD driver to enable GPU
-inference.` That warning is now gone, but the update changed nothing that
-matters. Measured after updating:
-
-| Backend | Speed |
-|---|---|
-| Vulkan on the 890M | 5.4 tok/s (was 5.2 before the update) |
-| ROCm forced via `OLLAMA_LLM_LIBRARY=rocm_v7_1` | falls back to `library=cpu`, 3.8 tok/s |
-
-Ollama no longer enumerates a ROCm device at all after the update - only
-`Vulkan0` (NVIDIA) and `Vulkan1` (AMD). This is not a missing-library problem:
-Ollama ships its own `rocm_v7_1` with a rocBLAS that lists `gfx1150`, and the
-HIP runtime (`amdhip64.dll`) is present in System32. Forcing the backend anyway
-just lands on the CPU, which is slower than Vulkan.
-
-So Vulkan is the answer on this machine. Do not spend time on ROCm again
-without new information.
+That path costs about 10x the tokens-per-second, so use it only if the RTX is
+needed exclusively for something else.
 
 ### Thinking is disabled
 

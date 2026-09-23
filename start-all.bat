@@ -11,6 +11,13 @@ if not defined COMFYUI_PORT set "COMFYUI_PORT=8188"
 rem Ollama serves the local LLM that writes scripts and expands image prompts.
 rem Its own tray app usually starts it at login, so this is just a safety net.
 if not defined OLLAMA_PORT set "OLLAMA_PORT=11434"
+
+rem Set explicitly rather than trusting the inherited environment. The weights
+rem are ~11GB and live on D:; without this Ollama silently falls back to
+rem %USERPROFILE%\.ollama\models, finds nothing, and every LLM call fails over
+rem to the raw search term instead of an expanded prompt - which looks like a
+rem quality regression, not an error.
+if not defined OLLAMA_MODELS set "OLLAMA_MODELS=D:\Developer\ollama-models"
 if "%SKIP_OLLAMA%"=="1" goto :comfyui
 
 call :probe_port %OLLAMA_PORT% 1
@@ -28,20 +35,15 @@ if not exist "%OLLAMA_EXE%" (
 echo ***** Starting Ollama at http://127.0.0.1:%OLLAMA_PORT% (separate window) *****
 if not defined OLLAMA_HOST set "OLLAMA_HOST=127.0.0.1:%OLLAMA_PORT%"
 
-rem Pin Ollama to the integrated Radeon 890M so the RTX 5070 Ti stays free for
-rem ComfyUI. Without this Ollama takes the NVIDIA card, and ComfyUI then cannot
-rem fit an image model - every generation times out.
-rem   CUDA_VISIBLE_DEVICES=-1   hides the NVIDIA card from the CUDA backend
-rem   GGML_VK_VISIBLE_DEVICES=1 picks the AMD device from the Vulkan list
-rem                             (index 0 is the NVIDIA card on this machine)
-rem These are cleared immediately after launch: the started process keeps the
-rem values it was given, and ComfyUI below must still see CUDA.
-set "CUDA_VISIBLE_DEVICES=-1"
-set "GGML_VK_VISIBLE_DEVICES=1"
-set "OLLAMA_IGPU_ENABLE=1"
+rem Ollama and ComfyUI share the RTX 5070 Ti by taking turns rather than by
+rem splitting it. OLLAMA_KEEP_ALIVE=0 unloads the model the moment a request
+rem finishes, handing the card straight back to ComfyUI; reloading costs about
+rem 3.6s from page cache, against 53 tok/s on the GPU versus 5 on the iGPU.
+rem ComfyUI is started below with --disable-smart-memory so it releases the card
+rem in the same way. Both halves are required: if either one squats on VRAM the
+rem other starves, and image generation then times out entirely.
+set "OLLAMA_KEEP_ALIVE=0"
 start "Ollama" "%OLLAMA_EXE%" serve
-set "CUDA_VISIBLE_DEVICES="
-set "GGML_VK_VISIBLE_DEVICES="
 call :probe_port %OLLAMA_PORT% 15
 if errorlevel 1 echo ***** Ollama did not answer in time. *****
 
@@ -67,7 +69,9 @@ set "COMFY_PY=python"
 if exist "%COMFYUI_DIR%\venv\Scripts\python.exe" set "COMFY_PY=%COMFYUI_DIR%\venv\Scripts\python.exe"
 
 echo ***** Starting ComfyUI at http://%COMFYUI_HOST%:%COMFYUI_PORT% (separate window) *****
-start "ComfyUI" /d "%COMFYUI_DIR%" "%COMFY_PY%" main.py --listen %COMFYUI_HOST% --port %COMFYUI_PORT%
+rem --disable-smart-memory makes ComfyUI offload models to system RAM instead of
+rem keeping them resident in VRAM, so Ollama can have the card between images.
+start "ComfyUI" /d "%COMFYUI_DIR%" "%COMFY_PY%" main.py --listen %COMFYUI_HOST% --port %COMFYUI_PORT% --disable-smart-memory
 
 echo ***** Waiting for ComfyUI to load its models (up to 2 minutes)... *****
 call :probe 60
