@@ -1519,6 +1519,9 @@ class TestLiteLLMProvider(unittest.TestCase):
             {
                 "model": "llama3",
                 "messages": [{"role": "user", "content": "Say hello"}],
+                # Reasoning models served by Ollama otherwise default to their
+                # most verbose thinking effort, which is discarded downstream.
+                "extra_body": {"think": False},
             },
         )
         self.assertEqual(result, "hello\nollama")
@@ -1569,6 +1572,36 @@ class TestLiteLLMProvider(unittest.TestCase):
 
         with patch.object(config, "is_running_in_container", return_value=True):
             self._assert_ollama_base_url("http://ollama:11434/v1")
+
+    def test_non_ollama_provider_does_not_disable_thinking(self):
+        """
+        `think` 只对 Ollama 有意义，其它 OpenAI 兼容服务商不应收到这个字段，
+        避免被严格校验请求体的网关拒绝。
+        """
+        config.app["llm_provider"] = "oneapi"
+        config.app["oneapi_api_key"] = "key"
+        config.app["oneapi_base_url"] = "http://oneapi:3000/v1"
+        config.app["oneapi_model_name"] = "gpt-4o-mini"
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                message = types.SimpleNamespace(content="hello")
+                choice = types.SimpleNamespace(message=message)
+                return types.SimpleNamespace(choices=[choice])
+
+        fake_completions = FakeCompletions()
+        fake_client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=fake_completions)
+        )
+
+        with (
+            patch.object(llm, "OpenAI", return_value=fake_client),
+            patch.object(llm, "ChatCompletion", types.SimpleNamespace),
+        ):
+            llm._generate_response("Say hello")
+
+        self.assertNotIn("extra_body", fake_completions.kwargs)
 
     def test_mimo_provider_uses_openai_compatible_client(self):
         """

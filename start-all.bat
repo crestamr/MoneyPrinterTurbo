@@ -27,7 +27,21 @@ if not exist "%OLLAMA_EXE%" (
 
 echo ***** Starting Ollama at http://127.0.0.1:%OLLAMA_PORT% (separate window) *****
 if not defined OLLAMA_HOST set "OLLAMA_HOST=127.0.0.1:%OLLAMA_PORT%"
+
+rem Pin Ollama to the integrated Radeon 890M so the RTX 5070 Ti stays free for
+rem ComfyUI. Without this Ollama takes the NVIDIA card, and ComfyUI then cannot
+rem fit an image model - every generation times out.
+rem   CUDA_VISIBLE_DEVICES=-1   hides the NVIDIA card from the CUDA backend
+rem   GGML_VK_VISIBLE_DEVICES=1 picks the AMD device from the Vulkan list
+rem                             (index 0 is the NVIDIA card on this machine)
+rem These are cleared immediately after launch: the started process keeps the
+rem values it was given, and ComfyUI below must still see CUDA.
+set "CUDA_VISIBLE_DEVICES=-1"
+set "GGML_VK_VISIBLE_DEVICES=1"
+set "OLLAMA_IGPU_ENABLE=1"
 start "Ollama" "%OLLAMA_EXE%" serve
+set "CUDA_VISIBLE_DEVICES="
+set "GGML_VK_VISIBLE_DEVICES="
 call :probe_port %OLLAMA_PORT% 15
 if errorlevel 1 echo ***** Ollama did not answer in time. *****
 

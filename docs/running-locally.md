@@ -88,39 +88,64 @@ Note that `ollama pull hf.co/<repo>:<quant>` fails on Ollama 0.34.3 with
 `realm host "huggingface.co" does not match original host "hf.co"`. Download the
 `.gguf` with curl and `ollama create` from a Modelfile instead.
 
-### Why the LLM is pinned to the CPU
+### Two GPUs, one job each
 
-The Modelfile sets `PARAMETER num_gpu 0`, which looks wasteful and is not.
+This machine has an RTX 5070 Ti (16 GB) **and** a Radeon 890M integrated GPU with
+32 GB carved out of system RAM. Ollama is pinned to the 890M so the RTX belongs
+entirely to ComfyUI.
 
-The card has 16 GB and ComfyUI needs essentially all of it to generate an image.
-Prompt expansion runs immediately *before* each image, so the two land on the GPU
-at the same moment. Measured on this machine:
+This matters more than it sounds. The card has 16 GB and ComfyUI needs
+essentially all of it to generate an image, while prompt expansion runs
+immediately *before* each image. Measured, same two-clip pipeline each time:
 
-| Configuration | Result |
-|---|---|
-| LLM on GPU (11.1 GB VRAM, 25 tok/s) | **every image times out - 0 clips produced** |
-| LLM on CPU (2.7 tok/s) | 2 clips in 474s, ~70s LLM + ~130s image per scene |
+| LLM placement | Speed | Pipeline result |
+|---|---|---|
+| RTX 5070 Ti (11.1 GB VRAM) | 25 tok/s | **0 clips - every image timed out** |
+| CPU only | 2.7 tok/s | 2 clips in 474s |
+| Radeon 890M via Vulkan | **5.2 tok/s** | **2 clips in 266s** |
 
-A fast LLM that produces no video is worth less than a slow one that does. If
-the GPU is ever dedicated to the LLM instead, drop the `num_gpu 0` line and
-expect roughly 25 tok/s.
-
-For reference, the censored `qwen3.8:27b` from the Ollama library is still
-installed at 17.7 GB. At Q4_K_M it does not fit in VRAM and measured **0.6
-tok/s**, so it is unusable here; `ollama rm qwen3.8:27b` reclaims the space.
-
-### Sizing rule for any replacement model
-
-Anything at or under ~11 GB can run fully on the GPU; above that Ollama splits it
-with system RAM and throughput collapses by roughly 40x. But GPU residency only
-helps if ComfyUI is not also generating - see the table above.
-
-Useful commands:
+Ollama hides integrated GPUs by default, logging
+`dropping integrated GPU; to enable, set OLLAMA_IGPU_ENABLE=1`. Enabling that is
+not enough on its own: Ollama still prefers the NVIDIA card, and hiding it from
+CUDA alone just makes Vulkan pick it up instead. `start-all.bat` launches the
+Ollama server with all three of these set, then clears the device variables so
+ComfyUI - started later by the same script - can still see CUDA:
 
 ```bat
-ollama list                     rem installed models
-ollama ps                       rem what is loaded, and the CPU/GPU split
-ollama run qwen3.8-unc:27b      rem chat with it directly
+set "CUDA_VISIBLE_DEVICES=-1"      rem hide NVIDIA from the CUDA backend
+set "GGML_VK_VISIBLE_DEVICES=1"    rem pick the AMD device from the Vulkan list
+set "OLLAMA_IGPU_ENABLE=1"         rem allow integrated GPUs at all
+```
+
+Never set `CUDA_VISIBLE_DEVICES` as a user-level environment variable. It would
+blind ComfyUI too.
+
+The Vulkan device index is machine-specific: index 0 is the NVIDIA card here.
+Confirm the choice in the server log, which should read
+`using device Vulkan0 (AMD Radeon(TM) 890M Graphics) ... 77452 MiB free`.
+
+ROCm would likely beat Vulkan, but the server logs
+`AMD driver is too old. Update your AMD driver to enable GPU inference.`
+Updating the Radeon driver is the obvious next experiment.
+
+### Thinking is disabled
+
+`app/services/llm.py` sends `extra_body={"think": False}` for the Ollama
+provider. This model's chat template defaults to `xhigh` reasoning effort, its
+most verbose setting, and `_normalize_text_response` discards the whole `<think>`
+trace anyway - so it was pure latency. Script generation went 83s to 55s and
+keyword generation 306s to 152s. Ollama ignores the flag for models without the
+thinking capability, so it is safe for any Ollama model.
+
+### Watch for orphaned runners
+
+Killing `ollama.exe` does **not** kill its `llama-server.exe` child processes,
+and those keep holding GPU memory. Five orphans had accumulated during testing
+and were squatting on 11.5 GB of the RTX. If ComfyUI starts timing out, check:
+
+```bat
+tasklist | findstr llama-server
+taskkill /F /IM llama-server.exe
 ```
 
 ## When does ComfyUI actually matter?

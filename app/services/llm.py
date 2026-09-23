@@ -620,8 +620,20 @@ def _generate_response(prompt: str, app_config=None) -> str:
             base_url=base_url,
         )
 
+        create_kwargs = {}
+        if llm_provider == "ollama":
+            # Reasoning models served by Ollama default to their most verbose
+            # thinking effort, and `_normalize_text_response` throws the whole
+            # <think> trace away afterwards. Locally that reasoning is pure
+            # latency: on CPU it tripled the time for a script or keyword call.
+            # Ollama ignores this flag for models without the capability, so it
+            # is safe to send for every Ollama model.
+            create_kwargs["extra_body"] = {"think": False}
+
         response = client.chat.completions.create(
-            model=model_name, messages=[{"role": "user", "content": prompt}]
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            **create_kwargs,
         )
         if response:
             if isinstance(response, ChatCompletion):
