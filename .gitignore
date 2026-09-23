@@ -54,3 +54,7 @@ omnivoice-service.err.log
 # Unrelated coursework files that happen to sit in this folder
 ITC101_*
 ITC_101*
+
+# Third-party services vendored under services/ (own git repos, venv/node_modules)
+services/autoclip/
+services/Open-Higgsfield-AI/
