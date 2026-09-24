@@ -135,6 +135,7 @@ VIDEO_SOURCE_GROUPS = {
         "wavespeed",
         "muapi",
         "minimax",
+        "minimax_product",
     ),
     "ai_image": ("openai_image", "qwen_image"),
     "local": ("local",),
@@ -5133,6 +5134,7 @@ def _render_video_settings(panel, params):
                 "ofox": tr("OFox AI Video"),
                 "metaso_minimax": tr("Metaso MiniMax H3"),
                 "minimax": tr("MiniMax H3 AI Video"),
+                "minimax_product": tr("TikTok Shop Product Video"),
                 "muapi": tr("MuAPI AI Video"),
                 "loomloom": tr("Shengsuan Cloud AI Video"),
                 "openai_image": tr("OpenAI Compatible Text-to-Image"),
@@ -5176,6 +5178,8 @@ def _render_video_settings(panel, params):
                 st.caption(tr("Metaso MiniMax H3 Help"))
             if params.video_source == "muapi":
                 st.caption(tr("MuAPI AI Video Help"))
+            if params.video_source == "minimax_product":
+                _render_product_video_settings()
             if params.video_source == "local":
                 # Streamlit 的文件类型校验对扩展名大小写敏感，这里同时放行大小写两种形式。
                 local_file_types = sorted(
@@ -7841,6 +7845,185 @@ def _render_subtitle_settings(panel, params):
                 st.toast(tr("Default Subtitle Settings Restored"))
 
 
+PRODUCT_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
+PRODUCT_VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".webm")
+
+
+def _save_product_upload(uploaded_file, prefix):
+    """Persist one uploaded reference to disk and return its path."""
+    target_dir = utils.storage_dir("product_images", create=True)
+    allowed = PRODUCT_IMAGE_EXTENSIONS + PRODUCT_VIDEO_EXTENSIONS
+    file_path = _build_uploaded_file_path(uploaded_file, target_dir, allowed, prefix)
+    with open(file_path, "wb") as handle:
+        handle.write(uploaded_file.getbuffer())
+    return file_path
+
+
+def _render_product_video_settings():
+    """Product details for the TikTok Shop source.
+
+    Kept inside the Video Settings panel rather than on a page of its own, so
+    the source selector, task manager, log view and history all keep working
+    unchanged. Values live in session state and are read again at submit time.
+    """
+    st.caption(tr("TikTok Shop Product Video Help"))
+
+    product_url = st.text_input(
+        tr("TikTok Shop Product URL"),
+        key="product_video_url",
+        placeholder="https://shop.tiktok.com/...",
+    )
+    if product_url and st.button(
+        tr("Fetch Product Details"), key="product_video_fetch"
+    ):
+        try:
+            from app.services import tiktok_shop
+
+            parsed = tiktok_shop.load_product(product_url)
+            if parsed.title and not st.session_state.get("product_video_name"):
+                st.session_state["product_video_name"] = parsed.title
+            st.session_state["product_video_listing_images"] = list(parsed.image_urls)
+            st.success(tr("Product Details Fetched"))
+        except Exception as exc:  # noqa: BLE001 - listing markup changes often
+            st.warning(f"{tr('Product Details Fetch Failed')}: {exc}")
+
+    st.text_input(
+        tr("Product Name"),
+        key="product_video_name",
+        help=tr("Product Name Help"),
+    )
+    st.text_input(tr("Product Features"), key="product_video_features",
+                  placeholder="lumbar support, 165 degree recline")
+    st.text_input(tr("Product Audience"), key="product_video_audience",
+                  placeholder=tr("Product Audience Placeholder"))
+
+    st.file_uploader(
+        tr("Product Images"),
+        type=[e.lstrip(".") for e in PRODUCT_IMAGE_EXTENSIONS],
+        accept_multiple_files=True,
+        key="product_video_images_uploader",
+        help=tr("Product Images Help"),
+    )
+    st.file_uploader(
+        tr("Presenter Reference"),
+        type=[e.lstrip(".") for e in PRODUCT_IMAGE_EXTENSIONS + PRODUCT_VIDEO_EXTENSIONS],
+        accept_multiple_files=False,
+        key="product_video_character_uploader",
+        help=tr("Presenter Reference Help"),
+    )
+
+    st.text_input(
+        tr("Presenter Outfit"),
+        key="product_video_outfit",
+        placeholder=tr("Presenter Outfit Placeholder"),
+    )
+    scene_count = st.number_input(
+        tr("Product Scene Count"), min_value=1, max_value=8,
+        value=int(config.minimax_product.get("scene_count", 4) or 4),
+        key="product_video_scenes",
+    )
+    st.number_input(
+        tr("Product Clip Seconds"), min_value=4, max_value=15,
+        value=int(config.minimax_product.get("clip_seconds", 6) or 6),
+        key="product_video_seconds",
+    )
+    # Unlike the local qwen_image source, every scene here is billed.
+    st.warning(tr("Product Cost Warning").format(count=int(scene_count)))
+
+
+def _collect_product_request(task_id):
+    """Build a ProductVideoRequest from the form, or return an error message."""
+    from app.services import minimax_media
+    from app.services.product_pipeline import ProductVideoRequest
+    from app.services.product_video import ProductInfo
+
+    name = str(st.session_state.get("product_video_name") or "").strip()
+    if not name:
+        return None, tr("Product Name Required")
+
+    images = []
+    for uploaded in st.session_state.get("product_video_images_uploader") or []:
+        try:
+            images.append(_save_product_upload(uploaded, "product"))
+        except ValueError:
+            return None, tr("Product Image Rejected").format(error=uploaded.name)
+    # Fall back to whatever the listing gave us when nothing was uploaded.
+    images.extend(st.session_state.get("product_video_listing_images") or [])
+    if not images:
+        return None, tr("Product Image Required")
+
+    for image in images:
+        if image.startswith(("http://", "https://")):
+            continue
+        try:
+            minimax_media.validate_image(image)
+        except minimax_media.MiniMaxMediaError as exc:
+            return None, str(exc)
+
+    character = ""
+    uploaded_character = st.session_state.get("product_video_character_uploader")
+    if uploaded_character is not None:
+        try:
+            character = _save_product_upload(uploaded_character, "character")
+        except ValueError:
+            return None, tr("Product Image Rejected").format(
+                error=uploaded_character.name
+            )
+        if minimax_media.is_video(character):
+            try:
+                character = minimax_media.extract_frame(character)
+            except minimax_media.MiniMaxMediaError as exc:
+                return None, str(exc)
+        try:
+            minimax_media.validate_image(character)
+        except minimax_media.MiniMaxMediaError as exc:
+            return None, str(exc)
+
+    features = [
+        feature.strip()
+        for feature in str(st.session_state.get("product_video_features") or "").split(",")
+        if feature.strip()
+    ]
+    product = ProductInfo(
+        name=name,
+        images=images,
+        features=features,
+        audience=str(st.session_state.get("product_video_audience") or "").strip(),
+        source_url=str(st.session_state.get("product_video_url") or "").strip(),
+    )
+    request = ProductVideoRequest(
+        product=product,
+        scene_count=int(st.session_state.get("product_video_scenes") or 4),
+        clip_seconds=int(st.session_state.get("product_video_seconds") or 6),
+        character_image=character,
+        outfit=str(st.session_state.get("product_video_outfit") or "").strip(),
+        output_path=os.path.join(
+            utils.task_dir(task_id), "product-video.mp4"
+        ),
+    )
+    return request, ""
+
+
+def _submit_product_video_task(task_id):
+    """Validate the product form and queue the job."""
+    request, error = _collect_product_request(task_id)
+    if error:
+        _remove_active_generation_task(task_id)
+        st.error(error)
+        st.stop()
+    try:
+        st.toast(tr("Generating Video"))
+        webui_task.submit_product_generation(
+            task_id=task_id,
+            request=request,
+            capture_logs=not config.ui.get("hide_log", False),
+        )
+    except Exception:
+        _remove_active_generation_task(task_id)
+        st.error(tr("Video Generation Failed"))
+        st.stop()
+
+
 def _render_generation_controls(
     params, uploaded_files, uploaded_audio_file, uploaded_bgm_file, voice_mode
 ):
@@ -7892,6 +8075,12 @@ def _render_generation_controls(
             task_id,
             subject=params.video_subject or params.video_script or task_id,
         )
+        if params.video_source == "minimax_product":
+            # A product video is built from the product and its photos, so
+            # none of the script, voice or subtitle validation below applies.
+            _submit_product_video_task(task_id)
+            return True
+
         if not params.video_subject and not params.video_script:
             _remove_active_generation_task(task_id)
             st.error(tr("Video Script and Subject Cannot Both Be Empty"))
@@ -7934,6 +8123,7 @@ def _render_generation_controls(
             "ofox",
             "metaso_minimax",
             "minimax",
+            "minimax_product",
             "muapi",
             "loomloom",
             "openai_image",

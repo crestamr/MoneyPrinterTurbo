@@ -557,6 +557,9 @@ azure = _SynchronizedConfig(_cfg.get("azure", {}))
 siliconflow = _SynchronizedConfig(_cfg.get("siliconflow", {}))
 minimax_tts = _SynchronizedConfig(_cfg.get("minimax_tts", {}))
 minimax_video = _SynchronizedConfig(_cfg.get("minimax_video", {}))
+# Product-showcase defaults. The API key, base URL, model and polling settings
+# are shared with [minimax_video]; only the per-run defaults live here.
+minimax_product = _SynchronizedConfig(_cfg.get("minimax_product", {}))
 qwen_image = _SynchronizedConfig(_cfg.get("qwen_image", {}))
 elevenlabs = _SynchronizedConfig(_cfg.get("elevenlabs", {}))
 chatterbox = _SynchronizedConfig(_cfg.get("chatterbox", {}))

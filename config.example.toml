@@ -753,3 +753,17 @@ open_task_folder_on_completion = true
 # subtitle_background_enabled = false
 # subtitle_background_color = "#000000"
 # rounded_subtitle_background = false
+
+# Product-showcase videos (image-conditioned MiniMax generation).
+# Used by make_product_video.py. Reuses [minimax_video] for the API key,
+# base URL, model, resolution and polling; only the product-specific
+# defaults live here.
+[minimax_product]
+# Seconds per scene. MiniMax accepts 4-15; short scenes read as more
+# authentic and cost less, since billing is per generation.
+clip_seconds = 6
+# How many scenes a run produces by default. Each one is a paid generation.
+scene_count = 4
+# How the on-camera presenter is described when no character reference image
+# is supplied. Keep it generic; the reference image should do this work.
+presenter = "a young person"

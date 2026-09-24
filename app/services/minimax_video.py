@@ -17,6 +17,7 @@ from loguru import logger
 
 from app.config import config
 from app.models.schema import MaterialInfo, VideoAspect
+from app.services import minimax_media
 from app.utils import utils
 
 MINIMAX_VIDEO_GLOBAL_BASE_URL = "https://api.minimax.io"
@@ -202,6 +203,8 @@ def _create_task(
     model: str,
     api_key: str,
     base_url: str,
+    reference_images: "list[str] | tuple[str, ...]" = (),
+    first_frame: str | None = None,
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
 ) -> str:
     """Submit a MiniMax H3 video generation job and return its task_id.
@@ -210,12 +213,18 @@ def _create_task(
     non-JSON body, non-dict JSON body, or a response missing task_id.
     """
     url = f"{base_url}/v2/video_generation"
+    # minimax_media owns the payload rules: role sits beside image_url, the two
+    # image modes are mutually exclusive, and any attached image forces
+    # ratio="adaptive" because the output follows the image, not the request.
+    content = minimax_media.build_content(
+        prompt, first_frame=first_frame, reference_images=reference_images
+    )
     payload = {
         "model": model,
-        "content": [{"type": "text", "text": prompt}],
+        "content": content,
         "resolution": resolution,
         "duration": duration,
-        "ratio": ratio,
+        "ratio": minimax_media.ratio_for(content, ratio),
     }
     try:
         response = requests.post(
@@ -274,6 +283,16 @@ def _poll_task(
                 timeout=(DEFAULT_CONNECT_TIMEOUT_SECONDS, request_timeout),
             )
         except requests.RequestException as exc:
+            # The generation is already paid for and still running server-side,
+            # so a flaky poll must not abandon it. Keep polling until the
+            # overall deadline; only give up if the network stays down.
+            if time.monotonic() < deadline:
+                logger.warning(
+                    f"MiniMax video query request failed, retrying: "
+                    f"task_id={task_id}, error={type(exc).__name__}"
+                )
+                time.sleep(poll_interval_seconds)
+                continue
             logger.error(
                 f"MiniMax video query request failed: error={type(exc).__name__}"
             )
@@ -391,24 +410,41 @@ def _download_to_cache(content_url: str, task_id: str) -> str:
     return destination
 
 
-def generate_videos_minimax(
-    search_term: str,
+def _probe_dimensions(video_path: str) -> "tuple[int, int] | None":
+    """Read the real frame size of a downloaded clip.
+
+    With a reference image attached the API returns ``ratio="adaptive"`` and the
+    output follows the *image*, so the requested VideoAspect is not necessarily
+    what came back. Recording the request's aspect would quietly mislabel the
+    material, so measure the file instead and fall back only if that fails.
+    """
+    try:
+        from moviepy import VideoFileClip
+
+        with VideoFileClip(video_path) as clip:
+            width, height = clip.size
+        return int(width), int(height)
+    except Exception as exc:  # noqa: BLE001 - probing is best-effort
+        logger.warning(
+            f"could not probe MiniMax clip dimensions, falling back to the "
+            f"requested aspect: path={video_path}, error={type(exc).__name__}: {exc}"
+        )
+        return None
+
+
+def _generate_clip(
+    *,
+    prompt: str,
     minimum_duration: int,
-    video_aspect: VideoAspect = VideoAspect.portrait,
+    video_aspect: VideoAspect,
+    reference_images: "list[str] | tuple[str, ...]" = (),
+    search_term: str = "",
 ) -> list[MaterialInfo]:
-    """Generate a single MiniMax H3 video clip for search_term.
+    """Create one MiniMax clip and return it as a MaterialInfo, or [] on failure.
 
-    This is the public entry point for the MiniMax H3 video-generation
-    provider, matching the calling convention of this codebase's other
-    video-material-provider functions (search_videos_pexels,
-    search_videos_pixabay, search_videos_coverr in app/services/material.py)
-    so it can be plugged directly into material.py's provider dispatch.
-
-    On any failure (missing API key, or any MiniMaxVideoError raised while
-    creating/polling/downloading the task) this logs the failure and returns
-    an empty list rather than raising, matching how the other provider
-    functions degrade gracefully instead of crashing the whole video
-    generation task.
+    Shared by the stock-footage and product entry points. Like every other
+    provider in material.py this degrades to an empty list rather than raising,
+    so one bad clip cannot abort a whole video task.
     """
     aspect = VideoAspect(video_aspect)
     api_key = get_minimax_video_api_key()
@@ -435,9 +471,15 @@ def generate_videos_minimax(
     )
     duration = _clamp_duration(minimum_duration, model=model)
     ratio = _aspect_to_ratio(aspect)
-    prompt = _build_prompt(search_term)
+    reference_images = list(reference_images or [])
 
-    logger.info(f"generating video with MiniMax {model}: term={search_term!r}")
+    if reference_images:
+        logger.info(
+            f"generating MiniMax {model} clip with {len(reference_images)} "
+            f"reference image(s)"
+        )
+    else:
+        logger.info(f"generating video with MiniMax {model}: term={search_term!r}")
 
     try:
         task_id = _create_task(
@@ -448,6 +490,7 @@ def generate_videos_minimax(
             model=model,
             api_key=api_key,
             base_url=base_url,
+            reference_images=reference_images,
         )
         content_url = _poll_task(
             task_id=task_id,
@@ -457,7 +500,7 @@ def generate_videos_minimax(
             poll_timeout_seconds=poll_timeout_seconds,
         )
         local_path = _download_to_cache(content_url, task_id)
-    except MiniMaxVideoError as exc:
+    except (MiniMaxVideoError, minimax_media.MiniMaxMediaError) as exc:
         logger.error(
             f"MiniMax video generation failed: term={search_term!r}, "
             f"error={type(exc).__name__}, detail={exc}"
@@ -465,6 +508,10 @@ def generate_videos_minimax(
         return []
 
     width, height = aspect.to_resolution()
+    if reference_images:
+        probed = _probe_dimensions(local_path)
+        if probed:
+            width, height = probed
 
     item = MaterialInfo()
     item.provider = "minimax"
@@ -476,4 +523,83 @@ def generate_videos_minimax(
         "asset_id": task_id,
         "rendition": {"id": model, "width": width, "height": height},
     }
+    if reference_images:
+        item.source_info["reference_image_count"] = len(reference_images)
     return [item]
+
+
+def generate_videos_minimax(
+    search_term: str,
+    minimum_duration: int,
+    video_aspect: VideoAspect = VideoAspect.portrait,
+) -> list[MaterialInfo]:
+    """Generate a single MiniMax H3 video clip for search_term.
+
+    This is the public entry point for the MiniMax H3 video-generation
+    provider, matching the calling convention of this codebase's other
+    video-material-provider functions (search_videos_pexels,
+    search_videos_pixabay, search_videos_coverr in app/services/material.py)
+    so it can be plugged directly into material.py's provider dispatch.
+
+    On any failure (missing API key, or any MiniMaxVideoError raised while
+    creating/polling/downloading the task) this logs the failure and returns
+    an empty list rather than raising, matching how the other provider
+    functions degrade gracefully instead of crashing the whole video
+    generation task.
+    """
+    return _generate_clip(
+        prompt=_build_prompt(search_term),
+        minimum_duration=minimum_duration,
+        video_aspect=video_aspect,
+        search_term=search_term,
+    )
+
+
+def generate_product_clip(
+    prompt: str,
+    minimum_duration: int,
+    reference_images: "list[str] | tuple[str, ...]",
+    video_aspect: VideoAspect = VideoAspect.portrait,
+) -> list[MaterialInfo]:
+    """Generate one product clip conditioned on reference images.
+
+    ``reference_images`` may be local paths, public URLs, or ``mm_file://``
+    handles; local files are validated and uploaded first. Up to 9 are allowed,
+    which is what lets a product shot and a presenter shot go in together.
+
+    ``prompt`` is passed through verbatim - unlike the stock-footage path it is
+    not wrapped in a generic template, because product prompts are authored
+    per-scene and describe how the product should be handled on camera.
+    """
+    aspect = VideoAspect(video_aspect)
+    api_key = get_minimax_video_api_key()
+    if not api_key:
+        logger.error(
+            "MiniMax video generation is not configured: set [minimax_video].api_key "
+            "or app.minimax_api_key in config.toml"
+        )
+        return []
+    base_url = get_minimax_video_base_url()
+
+    try:
+        resolved = [
+            minimax_media.resolve_image_ref(
+                str(source), api_key=api_key, base_url=base_url
+            )
+            for source in (reference_images or [])
+        ]
+    except minimax_media.MiniMaxMediaError as exc:
+        logger.error(f"MiniMax product clip reference image rejected: {exc}")
+        return []
+
+    if not resolved:
+        logger.error("generate_product_clip requires at least one reference image")
+        return []
+
+    return _generate_clip(
+        prompt=prompt,
+        minimum_duration=minimum_duration,
+        video_aspect=aspect,
+        reference_images=resolved,
+        search_term=prompt[:60],
+    )

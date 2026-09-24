@@ -644,3 +644,155 @@ class TestMiniMaxGenerateVideos(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGenerateProductClip(unittest.TestCase):
+    """The image-conditioned entry point used for product marketing videos."""
+
+    def setUp(self):
+        self.original_app_config = dict(config.app)
+        self.original_minimax_video_config = dict(config.minimax_video)
+        config.minimax_video["api_key"] = "test-key"
+
+    def tearDown(self):
+        config.app.clear()
+        config.app.update(self.original_app_config)
+        config.minimax_video.clear()
+        config.minimax_video.update(self.original_minimax_video_config)
+
+    def test_returns_empty_without_reference_images(self):
+        # Product mode is meaningless without the product; fail soft like every
+        # other provider rather than sending a text-only request by accident.
+        self.assertEqual(
+            minimax_video.generate_product_clip("a prompt", 6, []), []
+        )
+
+    def test_returns_empty_when_an_image_is_rejected(self):
+        with patch.object(
+            minimax_video.minimax_media,
+            "resolve_image_ref",
+            side_effect=minimax_video.minimax_media.MiniMaxMediaError("too big"),
+        ):
+            self.assertEqual(
+                minimax_video.generate_product_clip("p", 6, ["/tmp/x.png"]), []
+            )
+
+    def test_returns_empty_when_api_key_is_missing(self):
+        config.minimax_video["api_key"] = ""
+        config.app["minimax_api_key"] = ""
+        self.assertEqual(
+            minimax_video.generate_product_clip("p", 6, ["https://x/a.png"]), []
+        )
+
+    def test_sends_reference_image_roles_and_adaptive_ratio(self):
+        captured = {}
+
+        def _fake_post(url, headers=None, json=None, timeout=None):
+            captured["payload"] = json
+
+            class _R:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return {"task_id": "t1"}
+
+            return _R()
+
+        with patch.object(minimax_video.requests, "post", _fake_post), \
+             patch.object(minimax_video, "_poll_task", return_value="https://x/v.mp4"), \
+             patch.object(minimax_video, "_download_to_cache", return_value="/tmp/v.mp4"), \
+             patch.object(minimax_video, "_probe_dimensions", return_value=(1080, 1920)):
+            out = minimax_video.generate_product_clip(
+                "woman holds the bottle", 6,
+                ["https://x/product.png", "https://x/person.png"],
+            )
+
+        payload = captured["payload"]
+        self.assertEqual(payload["ratio"], "adaptive")
+        images = [c for c in payload["content"] if c["type"] == "image_url"]
+        self.assertEqual(len(images), 2)
+        self.assertTrue(all(c["role"] == "reference_image" for c in images))
+        # role must be a sibling of image_url, never nested inside it
+        self.assertTrue(all("role" not in c["image_url"] for c in images))
+        self.assertEqual(payload["content"][0], {"type": "text", "text": "woman holds the bottle"})
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].source_info["reference_image_count"], 2)
+
+    def test_records_probed_dimensions_not_the_requested_aspect(self):
+        # With an image attached the output follows the image, so the request's
+        # aspect would mislabel the material.
+        with patch.object(minimax_video, "_create_task", return_value="t1"), \
+             patch.object(minimax_video, "_poll_task", return_value="https://x/v.mp4"), \
+             patch.object(minimax_video, "_download_to_cache", return_value="/tmp/v.mp4"), \
+             patch.object(minimax_video, "_probe_dimensions", return_value=(1440, 1080)):
+            out = minimax_video.generate_product_clip("p", 6, ["https://x/a.png"])
+        self.assertEqual(out[0].source_info["rendition"]["width"], 1440)
+        self.assertEqual(out[0].source_info["rendition"]["height"], 1080)
+
+    def test_falls_back_to_requested_aspect_when_probing_fails(self):
+        with patch.object(minimax_video, "_create_task", return_value="t1"), \
+             patch.object(minimax_video, "_poll_task", return_value="https://x/v.mp4"), \
+             patch.object(minimax_video, "_download_to_cache", return_value="/tmp/v.mp4"), \
+             patch.object(minimax_video, "_probe_dimensions", return_value=None):
+            out = minimax_video.generate_product_clip("p", 6, ["https://x/a.png"])
+        expected = VideoAspect.portrait.to_resolution()
+        self.assertEqual(
+            (out[0].source_info["rendition"]["width"],
+             out[0].source_info["rendition"]["height"]),
+            expected,
+        )
+
+    def test_local_paths_are_resolved_to_mm_file_references(self):
+        with patch.object(
+            minimax_video.minimax_media, "resolve_image_ref", return_value="mm_file://9"
+        ) as resolve, \
+             patch.object(minimax_video, "_create_task", return_value="t1") as create, \
+             patch.object(minimax_video, "_poll_task", return_value="https://x/v.mp4"), \
+             patch.object(minimax_video, "_download_to_cache", return_value="/tmp/v.mp4"), \
+             patch.object(minimax_video, "_probe_dimensions", return_value=(1080, 1920)):
+            minimax_video.generate_product_clip("p", 6, ["C:/tmp/product.png"])
+        resolve.assert_called_once()
+        self.assertEqual(
+            create.call_args.kwargs["reference_images"], ["mm_file://9"]
+        )
+
+
+class TestPollRetriesTransientFailures(unittest.TestCase):
+    """A flaky poll must not abandon a generation that is already paid for."""
+
+    def test_retries_a_read_timeout_then_succeeds(self):
+        class _Ok:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"task": {"status": "succeeded",
+                                 "content": {"url": "https://x/v.mp4"}}}
+
+        calls = []
+
+        def _get(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise minimax_video.requests.ReadTimeout("slow")
+            return _Ok()
+
+        with patch.object(minimax_video.requests, "get", _get),              patch.object(minimax_video.time, "sleep", lambda *_: None):
+            url = minimax_video._poll_task(
+                task_id="t1", api_key="k", base_url="https://api",
+                poll_interval_seconds=0.01, poll_timeout_seconds=30,
+            )
+        self.assertEqual(url, "https://x/v.mp4")
+        self.assertEqual(len(calls), 2)
+
+    def test_gives_up_once_the_deadline_passes(self):
+        def _get(*args, **kwargs):
+            raise minimax_video.requests.ReadTimeout("still down")
+
+        with patch.object(minimax_video.requests, "get", _get),              patch.object(minimax_video.time, "sleep", lambda *_: None):
+            with self.assertRaises(minimax_video.MiniMaxVideoAPIError):
+                minimax_video._poll_task(
+                    task_id="t1", api_key="k", base_url="https://api",
+                    poll_interval_seconds=0.01, poll_timeout_seconds=-1,
+                )

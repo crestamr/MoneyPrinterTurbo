@@ -10,6 +10,7 @@ from app.models.schema import VideoParams
 from app.services import state as sm
 from app.services import task as tm
 from app.services.loomloom import LoomLoomConfirmedVideoRequest
+from app.services.product_pipeline import ProductVideoRequest
 from app.utils.logging_utils import format_log_record
 
 
@@ -191,5 +192,146 @@ def submit_generation(
         )
         logger.exception(
             f"failed to submit WebUI generation task, task_id={task_id}, error={exc}"
+        )
+        raise
+
+
+def _run_product_generation(
+    task_id: str,
+    request: "ProductVideoRequest",
+    capture_logs: bool,
+) -> dict:
+    """Run the product-video pipeline in a background thread.
+
+    Mirrors ``_run_generation``: same per-thread log filter, same config lock,
+    same guarantee that the worker always leaves a terminal state behind. The
+    pipeline itself is deliberately a different one - product videos have no
+    script, no TTS and no subtitles - so this cannot simply call ``tm.start``.
+    """
+    from app.services import product_pipeline
+
+    log_handler_id = None
+    worker_thread_id = threading.get_ident()
+    try:
+        if capture_logs:
+            log_handler_id = logger.add(
+                lambda message: _append_task_log(task_id, str(message)),
+                level="DEBUG",
+                format=format_log_record,
+                colorize=False,
+                filter=lambda record: record["thread"].id == worker_thread_id,
+            )
+
+        with config.runtime_config_lock():
+            result = product_pipeline.create_product_video(
+                request.product,
+                scene_count=request.scene_count,
+                clip_seconds=request.clip_seconds,
+                output_path=request.output_path,
+                character_image=request.character_image,
+                outfit=request.outfit,
+                aspect=request.aspect,
+            )
+
+        if not result.ok:
+            error = "; ".join(result.failures) or "no video was produced"
+            sm.state.update_task(
+                task_id,
+                state=const.TASK_STATE_FAILED,
+                progress=0,
+                failed_stage="product_pipeline",
+                error=error,
+            )
+            return {
+                "task_id": task_id,
+                "state": const.TASK_STATE_FAILED,
+                "progress": 0,
+                "failed_stage": "product_pipeline",
+                "error": error,
+            }
+
+        # Partial runs still succeed, so surface which scenes were lost rather
+        # than letting a shorter video look like a complete one.
+        for failure in result.failures:
+            logger.warning(f"product video partial failure: {failure}")
+
+        sm.state.update_task(
+            task_id,
+            state=const.TASK_STATE_COMPLETE,
+            progress=100,
+            videos=[result.output_path],
+        )
+        return {
+            "task_id": task_id,
+            "state": const.TASK_STATE_COMPLETE,
+            "progress": 100,
+            "videos": [result.output_path],
+            "failures": list(result.failures),
+            "generations_spent": result.generations_spent,
+        }
+    except Exception as exc:  # noqa: BLE001 - must always leave a terminal state
+        error = f"{type(exc).__name__}: {exc}"
+        sm.state.update_task(
+            task_id,
+            state=const.TASK_STATE_FAILED,
+            progress=0,
+            failed_stage="webui_worker",
+            error=error,
+        )
+        logger.exception(
+            f"unexpected product video worker failure, "
+            f"task_id={task_id}, error={exc}"
+        )
+        return {
+            "task_id": task_id,
+            "state": const.TASK_STATE_FAILED,
+            "progress": 0,
+            "failed_stage": "webui_worker",
+            "error": error,
+        }
+    finally:
+        if log_handler_id is not None:
+            try:
+                logger.remove(log_handler_id)
+            except ValueError:
+                logger.debug(
+                    f"WebUI task log handler already removed: task_id={task_id}"
+                )
+
+
+def submit_product_generation(
+    task_id: str,
+    request: "ProductVideoRequest",
+    capture_logs: bool = True,
+) -> None:
+    """Register and queue a product-video task, returning immediately.
+
+    State is written before the thread starts so the task manager can find the
+    task as soon as this page run ends, exactly as ``submit_generation`` does.
+    """
+    sm.state.update_task(
+        task_id,
+        state=const.TASK_STATE_PROCESSING,
+        progress=0,
+        video_subject=request.product.name or task_id,
+    )
+    try:
+        _task_manager.add_task(
+            _run_product_generation,
+            task_id=task_id,
+            request=request,
+            capture_logs=capture_logs,
+        )
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        sm.state.update_task(
+            task_id,
+            state=const.TASK_STATE_FAILED,
+            progress=0,
+            failed_stage="scheduling",
+            error=error,
+        )
+        logger.exception(
+            f"failed to submit product video task, task_id={task_id}, error={exc}"
         )
         raise

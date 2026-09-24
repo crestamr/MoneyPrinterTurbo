@@ -32,6 +32,7 @@ def test_ai_video_source_order_keeps_ofox_below_metaso():
         "wavespeed",
         "muapi",
         "minimax",
+        "minimax_product",
     )
     assert groups["stock_video"] == ("pexels", "pixabay", "coverr")
 

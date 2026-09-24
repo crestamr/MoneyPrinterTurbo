@@ -125,6 +125,7 @@ def test_grouped_video_source_keeps_groups_and_accessible_label_binding():
             "wavespeed",
             "muapi",
             "minimax",
+            "minimax_product",
             "openai_image",
             "qwen_image",
             "local",
