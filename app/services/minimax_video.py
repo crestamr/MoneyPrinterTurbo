@@ -27,6 +27,10 @@ DEFAULT_MODEL = "MiniMax-H3"
 DEFAULT_RESOLUTION = "768P"
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_POLL_TIMEOUT_SECONDS = 300.0
+# Reference-conditioned clips are much slower: with 9 references one run
+# took 3:45-5:00 per scene, and the 300 s default abandoned a clip that
+# MiniMax was still rendering (and billing). Waiting costs nothing.
+REFERENCE_POLL_TIMEOUT_SECONDS = 900.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
 
@@ -472,6 +476,8 @@ def _generate_clip(
     duration = _clamp_duration(minimum_duration, model=model)
     ratio = _aspect_to_ratio(aspect)
     reference_images = list(reference_images or [])
+    if reference_images:
+        poll_timeout_seconds = max(poll_timeout_seconds, REFERENCE_POLL_TIMEOUT_SECONDS)
 
     if reference_images:
         logger.info(

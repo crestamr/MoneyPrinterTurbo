@@ -796,3 +796,41 @@ class TestPollRetriesTransientFailures(unittest.TestCase):
                     task_id="t1", api_key="k", base_url="https://api",
                     poll_interval_seconds=0.01, poll_timeout_seconds=-1,
                 )
+
+
+class TestReferencePollTimeout(unittest.TestCase):
+    """Reference clips take 4-5 minutes; 300 s abandoned a billed generation."""
+
+    def setUp(self):
+        self.original = dict(config.minimax_video)
+        config.minimax_video["api_key"] = "k"
+        config.minimax_video["poll_timeout_seconds"] = 300
+
+    def tearDown(self):
+        config.minimax_video.clear()
+        config.minimax_video.update(self.original)
+
+    def _timeout_used(self, references):
+        with patch.object(minimax_video, "_create_task", return_value="t"), \
+             patch.object(minimax_video, "_poll_task", return_value="https://x/v.mp4") as poll, \
+             patch.object(minimax_video, "_download_to_cache", return_value="/tmp/v.mp4"), \
+             patch.object(minimax_video, "_probe_dimensions", return_value=(768, 1344)):
+            minimax_video._generate_clip(
+                prompt="p", minimum_duration=6, video_aspect=VideoAspect.portrait,
+                reference_images=references,
+            )
+        return poll.call_args.kwargs["poll_timeout_seconds"]
+
+    def test_reference_clips_wait_at_least_fifteen_minutes(self):
+        self.assertGreaterEqual(
+            self._timeout_used(["mm_file://1"]),
+            minimax_video.REFERENCE_POLL_TIMEOUT_SECONDS,
+        )
+
+    def test_text_only_clips_keep_the_configured_timeout(self):
+        self.assertEqual(self._timeout_used([]), 300)
+
+    def test_a_longer_configured_timeout_is_respected(self):
+        config.minimax_video["poll_timeout_seconds"] = 2000
+        self.assertEqual(self._timeout_used(["mm_file://1"]), 2000)
+
