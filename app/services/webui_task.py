@@ -230,6 +230,14 @@ def _run_product_generation(
                 output_path=request.output_path,
                 character_image=request.character_image,
                 outfit=request.outfit,
+                on_progress=lambda percent, stage, current, total: sm.state.update_task(
+                    task_id,
+                    state=const.TASK_STATE_PROCESSING,
+                    progress=percent,
+                    product_stage=stage,
+                    product_scene=current,
+                    product_scene_total=total,
+                ),
                 aspect=request.aspect,
             )
 

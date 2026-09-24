@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Callable
 
 from loguru import logger
 
@@ -87,6 +88,7 @@ def create_product_video(
     character_image: str = "",
     outfit: str = "",
     dry_run: bool = False,
+    on_progress: "Callable[[int, str, int, int], None] | None" = None,
 ) -> ProductVideoResult:
     """Generate one product ad end to end.
 
@@ -104,6 +106,18 @@ def create_product_video(
     """
     result = ProductVideoResult()
 
+    def report(percent: int, stage: str, current: int = 0, total: int = 0) -> None:
+        # A run takes 15-20 minutes; without this the WebUI sat at 0%.
+        # Progress is cosmetic, so a failing callback must never stop a
+        # run whose generations are already being paid for.
+        if on_progress is None:
+            return
+        try:
+            on_progress(percent, stage, current, total)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"progress callback failed: {exc}")
+
+    report(2, "writing", 0, scene_count)
     result.scenes = list(scenes) if scenes else product_video.generate_scenes(
         product, scene_count=scene_count
     )
@@ -138,6 +152,8 @@ def create_product_video(
 
     for index, prompt in enumerate(result.prompts, start=1):
         logger.info(f"generating scene {index}/{len(result.prompts)}")
+        total = len(result.prompts)
+        report(10 + int(80 * (index - 1) / total), "scene", index, total)
         materials = minimax_video.generate_product_clip(
             prompt, clip_seconds, references, aspect
         )
@@ -156,6 +172,8 @@ def create_product_video(
         output_path = os.path.join(
             output_dir, f"product-{utils.md5(product.name)[:8]}.mp4"
         )
+
+    report(92, "assembling", len(result.clip_paths), len(result.prompts))
 
     # ffmpeg will not create a missing parent directory, and a --out path
     # pointing somewhere that does not exist yet would otherwise throw away

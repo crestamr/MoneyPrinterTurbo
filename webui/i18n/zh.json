@@ -598,6 +598,9 @@
     "Product Cost Warning": "This will run {count} paid MiniMax generation(s), one per scene.",
     "Presenter Outfit": "Presenter outfit (optional)",
     "Presenter Outfit Placeholder": "a plain grey t-shirt",
-    "Too Many Product References": "{count} reference images selected; MiniMax accepts at most {limit} (product images plus the presenter). Remove some product images."
+    "Too Many Product References": "{count} reference images selected; MiniMax accepts at most {limit} (product images plus the presenter). Remove some product images.",
+    "Product Stage Writing": "writing the scenes",
+    "Product Stage Scene": "generating scene {current} of {total} (a few minutes each)",
+    "Product Stage Assembling": "assembling the video"
   }
 }

@@ -282,5 +282,42 @@ class TestReferencesUploadOncePerRun(unittest.TestCase):
         self.assertEqual(result.generations_spent, 0)
         self.assertTrue(any("could not be prepared" in f for f in result.failures))
 
+
+class TestProgressReporting(unittest.TestCase):
+    """The WebUI sat at 0% for a 15-20 minute run."""
+
+    def test_reports_writing_each_scene_and_assembly_in_order(self):
+        events = []
+        with patch.object(
+            product_pipeline.minimax_video,
+            "generate_product_clip",
+            return_value=[_material()],
+        ), patch.object(product_pipeline.video, "concat_video_clips_with_ffmpeg"):
+            product_pipeline.create_product_video(
+                _product(), scenes=[_scene(), _scene("b")], output_path="/tmp/o.mp4",
+                on_progress=lambda *event: events.append(event),
+            )
+        stages = [(stage, current) for _, stage, current, _ in events]
+        self.assertEqual(
+            stages, [("writing", 0), ("scene", 1), ("scene", 2), ("assembling", 2)]
+        )
+        percents = [percent for percent, *_ in events]
+        self.assertEqual(percents, sorted(percents))
+        self.assertTrue(all(0 < p < 100 for p in percents))
+
+    def test_a_failing_callback_does_not_stop_the_run(self):
+        def boom(*_):
+            raise RuntimeError("ui went away")
+
+        with patch.object(
+            product_pipeline.minimax_video,
+            "generate_product_clip",
+            return_value=[_material()],
+        ), patch.object(product_pipeline.video, "concat_video_clips_with_ffmpeg"):
+            result = product_pipeline.create_product_video(
+                _product(), scenes=[_scene()], output_path="/tmp/o.mp4", on_progress=boom,
+            )
+        self.assertTrue(result.ok)
+
 if __name__ == "__main__":
     unittest.main()

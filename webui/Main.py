@@ -1975,6 +1975,23 @@ def _render_generation_logs(task_id):
     st.code("\n".join(log_records))
 
 
+def _progress_text(task, progress):
+    """Progress label; product videos also say which stage they are in."""
+    text = f"{tr('Task Progress')}: {progress}%"
+    stage = task.get("product_stage")
+    if stage == "writing":
+        return f"{text} · {tr('Product Stage Writing')}"
+    if stage == "scene":
+        detail = tr("Product Stage Scene").format(
+            current=task.get("product_scene", 0),
+            total=task.get("product_scene_total", 0),
+        )
+        return f"{text} · {detail}"
+    if stage == "assembling":
+        return f"{text} · {tr('Product Stage Assembling')}"
+    return text
+
+
 def _render_generation_task_snapshot(task_id, task):
     """根据状态存储中的快照渲染进度、失败原因或最终成片。"""
     if not task:
@@ -1988,7 +2005,7 @@ def _render_generation_task_snapshot(task_id, task):
         st.info(tr("Generating Video"))
         st.progress(
             progress,
-            text=f"{tr('Task Progress')}: {progress}%",
+            text=_progress_text(task, progress),
         )
         _render_generation_logs(task_id)
         return
