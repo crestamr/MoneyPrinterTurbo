@@ -58,3 +58,4 @@ ITC_101*
 # Third-party services vendored under services/ (own git repos, venv/node_modules)
 services/autoclip/
 services/Open-Higgsfield-AI/
+services/VoiceStudio/
