@@ -10,6 +10,21 @@ from app.services import product_pipeline
 from app.services.product_video import ProductInfo, Scene
 
 
+_resolve_patch = patch.object(
+    product_pipeline.minimax_video,
+    "resolve_references",
+    side_effect=lambda refs: list(refs),
+)
+
+
+def setUpModule():
+    _resolve_patch.start()
+
+
+def tearDownModule():
+    _resolve_patch.stop()
+
+
 def _product():
     return ProductInfo(
         name="Portable Shaver",
@@ -217,6 +232,55 @@ class TestOutfitPlumbing(unittest.TestCase):
             product=_product(), outfit="a hoodie"
         )
         self.assertEqual(request.outfit, "a hoodie")
+
+
+class TestReferencesUploadOncePerRun(unittest.TestCase):
+    """A 4-scene run with 9 references used to upload 36 times."""
+
+    def test_each_reference_is_resolved_once_across_all_scenes(self):
+        _resolve_patch.stop()
+        self.addCleanup(_resolve_patch.start)
+        uploads = []
+
+        def _resolve(source, **kwargs):
+            uploads.append(source)
+            return f"mm_file://{len(uploads)}"
+
+        with patch.object(
+            product_pipeline.minimax_video.minimax_media, "resolve_image_ref", _resolve
+        ), patch.object(
+            product_pipeline.minimax_video, "get_minimax_video_api_key", return_value="k"
+        ), patch.object(
+            product_pipeline.minimax_video,
+            "generate_product_clip",
+            return_value=[_material()],
+        ) as gen, patch.object(product_pipeline.video, "concat_video_clips_with_ffmpeg"):
+            product_pipeline.create_product_video(
+                _product(),
+                scenes=[_scene(), _scene("b"), _scene("c"), _scene("d")],
+                character_image="C:/frames/creator.png",
+                output_path="/tmp/o.mp4",
+            )
+        # 2 references (character + product), resolved once, not 4 x 2.
+        self.assertEqual(len(uploads), 2)
+        # Every scene received the already-resolved handles.
+        for call in gen.call_args_list:
+            self.assertEqual(call.args[2], ["mm_file://1", "mm_file://2"])
+
+    def test_a_rejected_reference_stops_before_any_generation(self):
+        with patch.object(
+            product_pipeline.minimax_video,
+            "resolve_references",
+            side_effect=product_pipeline.minimax_media.MiniMaxMediaError("too small"),
+        ), patch.object(
+            product_pipeline.minimax_video, "generate_product_clip"
+        ) as gen:
+            result = product_pipeline.create_product_video(
+                _product(), scenes=[_scene()], output_path="/tmp/o.mp4"
+            )
+        gen.assert_not_called()
+        self.assertEqual(result.generations_spent, 0)
+        self.assertTrue(any("could not be prepared" in f for f in result.failures))
 
 if __name__ == "__main__":
     unittest.main()

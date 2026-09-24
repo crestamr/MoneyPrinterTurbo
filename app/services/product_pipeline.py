@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from loguru import logger
 
 from app.models.schema import VideoAspect
-from app.services import minimax_video, product_video, video
+from app.services import minimax_media, minimax_video, product_video, video
 from app.services.product_video import ProductInfo, Scene
 from app.utils import utils
 
@@ -127,6 +127,14 @@ def create_product_video(
     # ("Character reference the on-camera creator, <product> reference the
     # product"). Up to 9 reference images are allowed in one request.
     references = ([character_image] if character_image else []) + list(product.images)
+
+    # Upload every reference once for the whole run rather than once per
+    # scene, and fail before any paid generation if one is rejected.
+    try:
+        references = minimax_video.resolve_references(references)
+    except (minimax_video.MiniMaxVideoError, minimax_media.MiniMaxMediaError) as exc:
+        result.failures.append(f"reference images could not be prepared: {exc}")
+        return result
 
     for index, prompt in enumerate(result.prompts, start=1):
         logger.info(f"generating scene {index}/{len(result.prompts)}")

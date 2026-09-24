@@ -235,6 +235,9 @@ def _run_product_generation(
 
         if not result.ok:
             error = "; ".join(result.failures) or "no video was produced"
+            # Log it as well as storing it: the task manager shows only
+            # "Failed" from state, but it does show this task's log.
+            logger.error(f"product video failed: {error}")
             sm.state.update_task(
                 task_id,
                 state=const.TASK_STATE_FAILED,

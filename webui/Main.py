@@ -7947,8 +7947,11 @@ def _collect_product_request(task_id):
             images.append(_save_product_upload(uploaded, "product"))
         except ValueError:
             return None, tr("Product Image Rejected").format(error=uploaded.name)
-    # Fall back to whatever the listing gave us when nothing was uploaded.
-    images.extend(st.session_state.get("product_video_listing_images") or [])
+    # Fall back to the listing image only when nothing was uploaded. It used
+    # to be appended unconditionally, which pushed 8 uploads + listing +
+    # presenter past MiniMax's 9-reference cap and failed every scene.
+    if not images:
+        images.extend(st.session_state.get("product_video_listing_images") or [])
     if not images:
         return None, tr("Product Image Required")
 
@@ -7978,6 +7981,12 @@ def _collect_product_request(task_id):
             minimax_media.validate_image(character)
         except minimax_media.MiniMaxMediaError as exc:
             return None, str(exc)
+
+    reference_count = len(images) + (1 if character else 0)
+    if reference_count > minimax_media.MAX_REFERENCE_IMAGES:
+        return None, tr("Too Many Product References").format(
+            count=reference_count, limit=minimax_media.MAX_REFERENCE_IMAGES
+        )
 
     features = [
         feature.strip()

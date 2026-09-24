@@ -555,6 +555,28 @@ def generate_videos_minimax(
     )
 
 
+def resolve_references(sources: "list[str] | tuple[str, ...]") -> list[str]:
+    """Upload local reference images once and return their API handles.
+
+    ``generate_product_clip`` resolves references itself, which is right for a
+    one-off call but uploads everything again for every scene of a run. Calling
+    this first yields ``mm_file://`` handles (valid 7 days) that later calls
+    pass straight through. Raises instead of returning [] so the caller can
+    stop *before* spending on generations with a broken reference set.
+    """
+    api_key = get_minimax_video_api_key()
+    if not api_key:
+        raise MiniMaxVideoConfigurationError(
+            "MiniMax video generation is not configured: set [minimax_video].api_key "
+            "or app.minimax_api_key in config.toml"
+        )
+    base_url = get_minimax_video_base_url()
+    return [
+        minimax_media.resolve_image_ref(str(source), api_key=api_key, base_url=base_url)
+        for source in (sources or [])
+    ]
+
+
 def generate_product_clip(
     prompt: str,
     minimum_duration: int,

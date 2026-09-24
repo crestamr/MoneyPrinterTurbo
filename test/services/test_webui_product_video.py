@@ -188,3 +188,37 @@ def test_normal_sources_still_use_the_ordinary_pipeline():
 
         assert submit_normal.call_count == 1
         assert submit_product.call_count == 0
+
+
+def test_listing_image_is_not_added_on_top_of_uploads():
+    """8 uploads + listing image + presenter exceeded the 9-reference cap."""
+    import io as _io
+
+    from PIL import Image
+
+    def _png():
+        buf = _io.BytesIO()
+        Image.new("RGB", (512, 512), (90, 90, 90)).save(buf, format="PNG")
+        return buf.getvalue()
+
+    with (
+        patch.object(config, "app", _app()),
+        patch.object(config, "try_save_config", return_value=True),
+        patch("app.services.webui_task.submit_product_generation") as submit,
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=60)
+        app.session_state["ui_language"] = "en"
+        app.session_state["video_source_select_en"] = "minimax_product"
+        app.run()
+
+        _widget_by_key(app.text_input, "product_video_name").set_value("Chair").run()
+        app.session_state["product_video_listing_images"] = ["https://img/listing.jpg"]
+        uploader = _widget_by_key(app.get("file_uploader"), "product_video_images_uploader")
+        uploader.set_value([(f"p{i}.png", _png(), "image/png") for i in range(2)]).run()
+        _widget_by_key(app.button, "generate_video_button").click().run()
+
+        assert submit.call_count == 1
+        images = submit.call_args.kwargs["request"].product.images
+        assert len(images) == 2
+        assert "https://img/listing.jpg" not in images
+
