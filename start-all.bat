@@ -50,19 +50,19 @@ if errorlevel 1 echo ***** Ollama did not answer in time. *****
 :comfyui
 if "%SKIP_COMFYUI%"=="1" (
     echo ***** SKIP_COMFYUI=1 - skipping ComfyUI. *****
-    goto :webui
+    goto :openshorts
 )
 
 call :probe 1
 if not errorlevel 1 (
     echo ***** ComfyUI already running at http://%COMFYUI_HOST%:%COMFYUI_PORT% *****
-    goto :webui
+    goto :openshorts
 )
 
 if not exist "%COMFYUI_DIR%\main.py" (
     echo ***** ComfyUI not found at %COMFYUI_DIR% *****
     echo ***** Set COMFYUI_DIR to your install, or pick a video source other than Qwen-Image. *****
-    goto :webui
+    goto :openshorts
 )
 
 set "COMFY_PY=python"
@@ -80,6 +80,21 @@ if errorlevel 1 (
 ) else (
     echo ***** ComfyUI ready. *****
 )
+
+:openshorts
+if "%SKIP_OPENSHORTS%"=="1" (
+    echo ***** SKIP_OPENSHORTS=1 - skipping OpenShorts. *****
+    goto :webui
+)
+if not defined OPENSHORTS_DIR set "OPENSHORTS_DIR=D:\Developer\openshorts"
+if not exist "%OPENSHORTS_DIR%\start-openshorts.bat" (
+    echo ***** OpenShorts launcher not found in %OPENSHORTS_DIR% - skipping. *****
+    goto :webui
+)
+rem Own window: right after a Podman VM restart OpenShorts can take ~3 minutes
+rem to answer, which must not hold up the MoneyPrinterTurbo WebUI below.
+echo ***** Starting OpenShorts at http://localhost:5175 (separate window) *****
+start "OpenShorts" /min cmd /c ""%OPENSHORTS_DIR%\start-openshorts.bat""
 
 :webui
 echo.

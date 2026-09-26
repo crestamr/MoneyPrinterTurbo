@@ -19,6 +19,7 @@ waits for it to finish loading, and then hands off to `webui.bat`.
 | http://127.0.0.1:8501 | MoneyPrinterTurbo WebUI |
 | http://127.0.0.1:8188 | ComfyUI |
 | http://127.0.0.1:11434 | Ollama |
+| http://localhost:5175 | OpenShorts dashboard (Podman, own window) |
 
 If port 8501 is taken, `webui.bat` moves to the next free port in 8502-8599 and
 prints the address it picked.
@@ -35,6 +36,15 @@ Stop everything by closing the two console windows, or pressing Ctrl+C in each.
 | `SKIP_COMFYUI` | unset | Set to `1` to skip ComfyUI |
 | `OLLAMA_PORT` | `11434` | Port Ollama binds to |
 | `SKIP_OLLAMA` | unset | Set to `1` to skip Ollama |
+| `OPENSHORTS_DIR` | `D:\Developer\openshorts` | Where OpenShorts and its `start-openshorts.bat` live |
+| `SKIP_OPENSHORTS` | unset | Set to `1` to skip OpenShorts |
+
+OpenShorts starts in its own minimised window because, right after the Podman
+VM restarts, it can take about three minutes to answer. Its launcher also
+repairs the VM's stale view of `D:` (the dashboard dies with `EIO` after a day
+or so of uptime). Finished clips are kept 30 days and downloaded sources 3
+days (`JOB_RETENTION_SECONDS` / `SOURCE_RETENTION_SECONDS` in OpenShorts'
+`docker-compose.override.yml`); the upstream default deletes clips after 24 h.
 | `MPT_WEBUI_HOST` | `127.0.0.1` | Host the WebUI binds to (read by `webui.bat`) |
 | `MPT_WEBUI_PORT` | `8501` | Preferred WebUI port (read by `webui.bat`) |
 
