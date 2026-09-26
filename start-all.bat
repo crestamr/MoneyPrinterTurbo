@@ -50,19 +50,19 @@ if errorlevel 1 echo ***** Ollama did not answer in time. *****
 :comfyui
 if "%SKIP_COMFYUI%"=="1" (
     echo ***** SKIP_COMFYUI=1 - skipping ComfyUI. *****
-    goto :openshorts
+    goto :anime_scene
 )
 
 call :probe 1
 if not errorlevel 1 (
     echo ***** ComfyUI already running at http://%COMFYUI_HOST%:%COMFYUI_PORT% *****
-    goto :openshorts
+    goto :anime_scene
 )
 
 if not exist "%COMFYUI_DIR%\main.py" (
     echo ***** ComfyUI not found at %COMFYUI_DIR% *****
     echo ***** Set COMFYUI_DIR to your install, or pick a video source other than Qwen-Image. *****
-    goto :openshorts
+    goto :anime_scene
 )
 
 set "COMFY_PY=python"
@@ -80,6 +80,15 @@ if errorlevel 1 (
 ) else (
     echo ***** ComfyUI ready. *****
 )
+
+:anime_scene
+rem Installs the MiniMax H3 "Anime Scene" workflows into ComfyUI's workflow
+rem browser. Additive only: workflows edited in the UI are never overwritten.
+if "%SKIP_ANIME_SCENE%"=="1" goto :openshorts
+set "SETUP_PY=python"
+if exist "%ROOT%.venv\Scripts\python.exe" set "SETUP_PY=%ROOT%.venv\Scripts\python.exe"
+"%SETUP_PY%" "%ROOT%scripts\setup_anime_scene.py" --comfy "%COMFYUI_DIR%"
+if errorlevel 1 echo ***** Anime Scene workflow setup failed - see above. *****
 
 :openshorts
 if "%SKIP_OPENSHORTS%"=="1" (

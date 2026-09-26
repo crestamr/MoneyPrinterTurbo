@@ -38,6 +38,7 @@ Stop everything by closing the two console windows, or pressing Ctrl+C in each.
 | `SKIP_OLLAMA` | unset | Set to `1` to skip Ollama |
 | `OPENSHORTS_DIR` | `D:\Developer\openshorts` | Where OpenShorts and its `start-openshorts.bat` live |
 | `SKIP_OPENSHORTS` | unset | Set to `1` to skip OpenShorts |
+| `SKIP_ANIME_SCENE` | unset | Set to `1` to skip installing the Anime Scene workflows |
 
 OpenShorts starts in its own minimised window because, right after the Podman
 VM restarts, it can take about three minutes to answer. Its launcher also
@@ -54,6 +55,22 @@ Example - WebUI only, because you are using a stock-footage video source:
 set SKIP_COMFYUI=1
 start-all.bat
 ```
+
+## Anime Scene workflows (MiniMax H3)
+
+`start-all.bat` runs `scripts/setup_anime_scene.py`, which installs the pack in
+`resource/Minimax H3 - Anime Scene from reference/` into ComfyUI: the four
+reference images go to `input/anime-scene/`, and five workflows appear under
+**Workflows > Anime Scene (MiniMax H3)** - four Qwen-Image 2.1 generators for
+the reference images and the H3 reference-to-video workflow. It only adds
+missing files, so workflows edited in the UI survive; `--force` rebuilds them.
+The pack is third-party material and is not in git; without it the step is a
+no-op.
+
+The H3 models (about 44 GB, from `Comfy-Org/MiniMax-H3`) are larger than the
+16 GB card, so ComfyUI streams them from system RAM: a 10-second clip at
+0.6 MP takes 5-12 minutes per sampling step, depending on how much RAM is free.
+Close other heavy apps first, or shorten the duration / lower the megapixels.
 
 ## Starting the pieces on their own
 
